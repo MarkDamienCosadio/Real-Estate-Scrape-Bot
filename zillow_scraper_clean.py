@@ -33,7 +33,7 @@ ZIPCODES = [
 ]
 
 class ZillowScraper:
-    def __init__(self, options=None):
+    def __init__(self, options=None, max_listings=0):
         logging.info("Initializing ZillowScraper...")
 
         # Create timestamp for the output file
@@ -94,9 +94,9 @@ class ZillowScraper:
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         # Initialize instance variables
-        self.stop_after_first = False  # Default to scraping all listings
+        self.max_listings = max_listings  # Number of listings to process (0 means no limit)
         self.current_zipcode = None
-        logging.info("ZillowScraper initialized successfully")
+        logging.info(f"ZillowScraper initialized successfully. Max listings per zipcode: {max_listings if max_listings > 0 else 'No limit'}")
 
     def apply_filters(self):
         """Apply filters for price and beds on the search results page"""
@@ -326,9 +326,9 @@ class ZillowScraper:
         listing_count = self.count_listings()
         logging.info(f"Found {listing_count} listings in search results")
         
-        # Open the first listing
-        logging.info("Opening the first listing")
-        self.open_first_listing()
+        # Process listings
+        logging.info("Starting to process listings")
+        self.process_all_listings(self.max_listings)
         
     def count_listings(self):
         """Count the number of listings in the search results"""
@@ -389,6 +389,125 @@ class ZillowScraper:
             logging.error(f"Error counting listings: {str(e)}")
             return 0
     
+    def process_all_listings(self, max_listings=0):
+        """Process listings on the search results page
+        
+        Args:
+            max_listings: Maximum number of listings to process (0 for all listings)
+        """
+        if max_listings > 0:
+            logging.info(f"Processing up to {max_listings} listings on the page")
+        else:
+            logging.info("Processing all listings on the page")
+            
+        wait = WebDriverWait(self.driver, 10)
+        processed_urls = set()  # Keep track of already processed URLs to avoid duplicates
+        
+        try:
+            # Get all listing elements
+            listing_selectors = [
+                # Find all listings with these selectors
+                '//div[contains(@class, "property-card")]/a',
+                '//ul[contains(@class, "photo-cards")]//li//a[contains(@class, "property-card")]',
+                '//li[contains(@class, "ListItem")]//a',
+                '//div[contains(@class, "StyledPropertyCardDataWrapper")]//a',
+                '//li[contains(@class, "search-result")]//a',
+                '//article[contains(@class, "property-card")]//a',
+                '//div[contains(@class, "list-card")]//a',
+                '//div[@data-test="property-card"]//a'
+            ]
+            
+            # Try each selector until we find listings
+            all_listings = []
+            for selector in listing_selectors:
+                try:
+                    listings = self.driver.find_elements(By.XPATH, selector)
+                    if len(listings) > 0:
+                        all_listings = listings
+                        logging.info(f"Found {len(listings)} listings with selector: {selector}")
+                        break
+                except Exception as e:
+                    logging.warning(f"Failed to find listings with selector {selector}: {str(e)}")
+            
+            if not all_listings:
+                logging.warning("Could not find any listings with the provided selectors")
+                return False
+            
+            # Determine how many listings to process
+            if max_listings > 0:
+                listings_to_process = min(max_listings, len(all_listings))
+                logging.info(f"Will process {listings_to_process} out of {len(all_listings)} available listings")
+            else:
+                listings_to_process = len(all_listings)
+                logging.info(f"Will process all {listings_to_process} available listings")
+                
+            # Process each listing
+            processed_count = 0
+            for i, listing in enumerate(all_listings):
+                # Stop if we've reached the maximum number of listings to process
+                if max_listings > 0 and processed_count >= max_listings:
+                    logging.info(f"Reached maximum number of listings to process ({max_listings})")
+                    break
+                    
+                try:
+                    # Get listing URL before clicking
+                    try:
+                        listing_url = listing.get_attribute('href')
+                        if not listing_url or listing_url in processed_urls:
+                            continue  # Skip if no URL or already processed
+                        
+                        processed_urls.add(listing_url)
+                    except Exception as e:
+                        logging.warning(f"Could not get URL for listing {i+1}: {str(e)}")
+                        continue
+                    
+                    logging.info(f"Processing listing {i+1}/{listings_to_process}: {listing_url}")
+                    
+                    # Click to open the listing
+                    try:
+                        # Store the current window handle
+                        main_window = self.driver.current_window_handle
+                        
+                        # Open in new tab
+                        ActionChains(self.driver).key_down(Keys.CONTROL).click(listing).key_up(Keys.CONTROL).perform()
+                        
+                        # Switch to the new tab
+                        wait.until(lambda d: len(d.window_handles) > 1)
+                        new_tab = [window for window in self.driver.window_handles if window != main_window][0]
+                        self.driver.switch_to.window(new_tab)
+                        
+                        # Wait for page to load
+                        wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
+                        time.sleep(3)  # Additional wait to ensure page elements load
+                        
+                        # Extract data
+                        self.extract_listing_data(listing_url)
+                        
+                        # Close tab and switch back to main window
+                        self.driver.close()
+                        self.driver.switch_to.window(main_window)
+                        
+                        # Increment the processed count
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        logging.error(f"Error processing listing {i+1}: {str(e)}")
+                        # If something goes wrong, make sure we're back at the main window
+                        try:
+                            self.driver.switch_to.window(main_window)
+                        except:
+                            pass  # Already on main window or other issue
+                
+                except Exception as e:
+                    logging.error(f"Unexpected error processing listing {i+1}: {str(e)}")
+                    # Continue with next listing rather than stopping
+            
+            return True
+                
+        except Exception as e:
+            logging.error(f"Error processing listings: {str(e)}")
+            return False
+            
     def open_first_listing(self):
         """Open the first listing in the search results"""
         logging.info("Attempting to open the first listing")
@@ -780,6 +899,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Zillow Property Scraper')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retries per zipcode')
+    parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')
     args = parser.parse_args()
     
     # Chrome options
@@ -790,7 +910,7 @@ if __name__ == "__main__":
     options.add_argument('--start-maximized')
     
     # Create the scraper instance with our options
-    bot = ZillowScraper(options)
+    bot = ZillowScraper(options, args.max_listings)
     
     try:
         
