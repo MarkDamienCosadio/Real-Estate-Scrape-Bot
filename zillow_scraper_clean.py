@@ -113,6 +113,15 @@ class ZillowScraper:
     def apply_filters(self):
         """Apply filters for price and beds on the search results page"""
         logging.info("Applying filters to search results")
+        
+        # First check the current page title - if we're on an "Access denied" page,
+        # try to handle the press and hold challenge
+        if "Access to this page has been denied" in self.driver.title:
+            logging.warning("Detected access denied page before applying filters")
+            if not self.handle_press_and_hold_challenge():
+                logging.error("Unable to pass bot detection before applying filters - will try to continue anyway")
+        else:
+            logging.info("No access denied page detected, proceeding with filters")
         wait = WebDriverWait(self.driver, 10)
         
         # Apply price filter (min $200,000)
@@ -320,11 +329,46 @@ class ZillowScraper:
         try:
             self.driver.get(url)
             logging.info(f"Successfully loaded URL: {url}")
+            
+            # Wait for page to load
+            time.sleep(5)  # Initial wait time
+            
+            # Check for bot detection "Press & Hold" challenge
+            if not self.handle_press_and_hold_challenge():
+                # After the handle_press_and_hold_challenge function completes (which now includes
+                # checking title after refresh), check if we're still seeing the Access Denied page
+                current_title = self.driver.title
+                if "Access to this page has been denied" not in current_title:
+                    logging.info("Challenge appears to be solved despite reported failure - continuing")
+                else:
+                    # Try one more time with a different approach - use an alternate URL
+                    logging.warning("Still seeing Access Denied - trying with alternate URL format")
+                    
+                    try:
+                        alternate_url = f"https://www.zillow.com/homes/for_sale/{zipcode}/"
+                        logging.info(f"Trying alternate URL format: {alternate_url}")
+                        self.driver.get(alternate_url)
+                        time.sleep(5)
+                        
+                        # Check if this new URL load bypassed the challenge
+                        if "Access to this page has been denied" not in self.driver.title:
+                            logging.info("Successfully bypassed challenge with alternate URL")
+                        else:
+                            # Try the challenge again on the new URL
+                            if not self.handle_press_and_hold_challenge():
+                                logging.error("Failed to pass bot detection challenge after all attempts - cannot continue")
+                                return
+                    except Exception as e:
+                        logging.warning(f"Failed to load alternate URL: {str(e)} - cannot continue")
+                        return
+            
+            logging.info("Successfully passed any bot detection challenges")
+            
         except Exception as e:
             logging.error(f"Error loading URL {url}: {str(e)}")
             return
             
-        time.sleep(5)  # Increased initial wait time
+        time.sleep(3)  # Additional wait time before applying filters
         
         # Apply filters
         logging.info("Applying filters to search results")
@@ -1411,6 +1455,21 @@ class ZillowScraper:
                 # Additional wait for elements to render
                 time.sleep(3)
                 
+                # Check if we're on an "Access denied" page after navigation
+                if "Access to this page has been denied" in self.driver.title:
+                    logging.warning("Detected access denied page after navigation")
+                    
+                    # Try to pass the challenge
+                    if self.handle_press_and_hold_challenge():
+                        logging.info("Successfully passed challenge after navigation")
+                    else:
+                        # Check title again after challenge attempts
+                        if "Access to this page has been denied" not in self.driver.title:
+                            logging.info("Challenge appears to be solved despite reported failure")
+                        else:
+                            logging.error("Failed to pass bot detection challenge after navigating to next page")
+                            # We'll try to continue anyway - might work for some elements
+                
                 logging.info("Successfully navigated to the next page")
                 return True
                 
@@ -1558,6 +1617,183 @@ class ZillowScraper:
         except Exception as e:
             logging.debug(f"Error extracting schema.org data: {str(e)}")
             return {}
+    
+    def handle_press_and_hold_challenge(self, max_attempts=3):
+        """Handle the 'Press & Hold' bot detection challenge
+        
+        Args:
+            max_attempts: Maximum number of attempts to pass the challenge
+            
+        Returns:
+            bool: True if challenge was passed or not detected, False otherwise
+        """
+        try:
+            # Check if we're facing a bot detection page
+            page_title = self.driver.title
+            page_source = self.driver.page_source
+            logging.info(f"Current page title: {page_title}")
+            
+            # Check for bot detection indicators
+            bot_detection_indicators = [
+                "Access to this page has been denied",
+                "Press & Hold",
+                "press and hold",
+                "security check",
+                "bot detection",
+                "human verification"
+            ]
+            
+            is_bot_detection = False
+            for indicator in bot_detection_indicators:
+                if indicator.lower() in page_title.lower() or indicator.lower() in page_source.lower():
+                    is_bot_detection = True
+                    logging.info(f"Bot detection identified by indicator: {indicator}")
+                    break
+                    
+            if is_bot_detection:
+                logging.info("Detected bot protection challenge with 'Press & Hold' button")
+                
+                # Look for the Press & Hold button using different selectors
+                press_hold_selectors = [
+                    "//p[contains(text(), 'Press') and contains(text(), 'Hold')]",
+                    "//p[@id='RvMKxvJTAzNJLSy' and @class='QIFoYgojXGVhqnd']",
+                    "//*[contains(text(), 'Press') and contains(text(), 'Hold')]",
+                    "//button[contains(text(), 'Press')]",
+                    "//div[contains(@class, 'challenge')]//p",
+                    "//div[contains(@class, 'captcha')]//p",
+                    "//p[contains(@class, 'QIFoYgojXGVhqnd')]"  # Class from your example
+                ]
+                
+                attempts = 0
+                while attempts < max_attempts:
+                    attempts += 1
+                    logging.info(f"Attempt {attempts}/{max_attempts} to solve Press & Hold challenge")
+                    
+                    # Try each selector
+                    button = None
+                    for selector in press_hold_selectors:
+                        try:
+                            elements = self.driver.find_elements(By.XPATH, selector)
+                            for element in elements:
+                                text = element.text.lower()
+                                if 'press' in text and ('&' in text or 'and' in text or 'hold' in text):
+                                    button = element
+                                    logging.info(f"Found 'Press & Hold' button: '{element.text}' using selector: {selector}")
+                                    break
+                            if button:
+                                break
+                        except:
+                            continue
+                    
+                    if not button:
+                        # Try a more aggressive approach - look for any clickable elements
+                        try:
+                            logging.info("No specific 'Press & Hold' button found, looking for any clickable elements")
+                            all_elements = self.driver.find_elements(By.XPATH, "//button | //p | //div[@role='button']")
+                            for element in all_elements:
+                                try:
+                                    if element.is_displayed() and element.is_enabled():
+                                        text = element.text.lower()
+                                        if text and len(text) < 30:  # Likely to be a button text
+                                            logging.info(f"Found potential interactive element: '{element.text}'")
+                                            button = element
+                                            break
+                                except:
+                                    continue
+                        except:
+                            pass
+                    
+                    if button:
+                        try:
+                            logging.info(f"Attempting to press and hold button: '{button.text}'")
+                            
+                            # First scroll into view
+                            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'auto', block: 'center'});", button)
+                            time.sleep(1)
+                            
+                            # Create action chain for press and hold
+                            actions = ActionChains(self.driver)
+                            
+                            # Try with longer press times on subsequent attempts
+                            hold_time = 3 + (attempts * 2)  # Increase hold time with each attempt
+                            
+                            # Move to the button first
+                            actions.move_to_element(button)
+                            actions.pause(0.5)
+                            
+                            # Try different strategies based on attempt number
+                            if attempts == 1:
+                                # First attempt: normal click and hold
+                                actions.click_and_hold()
+                                actions.pause(hold_time)  # Hold for specified time
+                                actions.release()
+                                actions.perform()
+                            else:
+                                # Subsequent attempts: try a more human-like interaction
+                                # First click normally, then click and hold
+                                actions.click()
+                                actions.pause(0.5)
+                                actions.click_and_hold()
+                                
+                                # Add a slight mouse movement during holding to simulate human behavior
+                                for i in range(3):
+                                    actions.move_by_offset(1, 0)
+                                    actions.pause(0.1)
+                                    actions.move_by_offset(-1, 0)
+                                    actions.pause(0.1)
+                                
+                                actions.pause(hold_time)
+                                actions.release()
+                                actions.perform()
+                            
+                            logging.info(f"Completed press and hold for {hold_time} seconds")
+                            
+                            # Wait for the page to load after passing the challenge
+                            time.sleep(5)
+                            
+                            # Check if we passed the challenge
+                            new_page_title = self.driver.title
+                            logging.info(f"Page title after attempt {attempts}: {new_page_title}")
+                            
+                            if "Access to this page has been denied" not in new_page_title and "Press & Hold" not in self.driver.page_source:
+                                logging.info(f"Successfully passed the challenge on attempt {attempts}")
+                                return True
+                            else:
+                                logging.warning(f"Challenge still active after attempt {attempts}")
+                        except Exception as e:
+                            logging.error(f"Error during press and hold attempt {attempts}: {str(e)}")
+                    else:
+                        logging.warning(f"Could not find any 'Press & Hold' button on attempt {attempts}")
+                        
+                    # If we reach here, the attempt failed - refresh the page and try again
+                    if attempts < max_attempts:
+                        logging.info("Refreshing page before next attempt")
+                        try:
+                            self.driver.refresh()
+                            time.sleep(5)  # Give page time to fully load after refresh
+                            
+                            # Check if the title has changed after refresh - maybe challenge was solved
+                            refreshed_title = self.driver.title
+                            logging.info(f"Page title after refresh: {refreshed_title}")
+                            
+                            # If the "Access denied" title is gone after refresh, we've passed the challenge
+                            if "Access to this page has been denied" not in refreshed_title:
+                                logging.info("Challenge appears to be solved after page refresh!")
+                                return True
+                                
+                        except Exception as e:
+                            logging.error(f"Error refreshing page: {str(e)}")
+                            time.sleep(3)  # Still wait even if refresh fails
+                
+                logging.error(f"Failed to pass 'Press & Hold' challenge after {max_attempts} attempts")
+                return False
+            else:
+                logging.info("No bot protection challenge detected")
+                return True
+                
+        except Exception as e:
+            logging.error(f"Error handling press and hold challenge: {str(e)}")
+            return False
     
     def is_valid_property_card(self, element):
         """
