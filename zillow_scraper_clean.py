@@ -3,6 +3,7 @@ import random
 import os
 import csv
 import re
+import json
 import pandas as pd
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -28,18 +29,22 @@ console.setLevel(logging.INFO)
 logging.getLogger('').addHandler(console)
 
 ZIPCODES = [
-    '33009', '33019', '33119', '33128', '33129', '33130', '33131', '33139', '33140', '33141', '33149', '33154', '33160',
-    '33180', '33239'
+    '33009'  # Only processing one zipcode for testing
 ]
 
 class ZillowScraper:
-    def __init__(self, options=None, max_listings=0):
+    def __init__(self, options=None, max_listings=0, keep_browser_open=False, first_page_only=False, debug_all_li=False):
         logging.info("Initializing ZillowScraper...")
 
         # Create timestamp for the output file
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self.output_file = 'zillow_results.csv'
         logging.info(f"Output will be saved to: {self.output_file}")
+        
+        # Debug options
+        self.debug_all_li = debug_all_li
+        if debug_all_li:
+            logging.info("DEBUG MODE: Will process all li elements as potential listings")
         
         # Track the current zipcode
         self.current_zipcode = None
@@ -96,7 +101,14 @@ class ZillowScraper:
         # Initialize instance variables
         self.max_listings = max_listings  # Number of listings to process (0 means no limit)
         self.current_zipcode = None
+        self.processed_urls = set()  # Keep track of processed URLs across all pages
+        self.keep_browser_open = keep_browser_open  # Flag to determine whether to close the browser
+        self.first_page_only = first_page_only  # Flag to only process the first page
         logging.info(f"ZillowScraper initialized successfully. Max listings per zipcode: {max_listings if max_listings > 0 else 'No limit'}")
+        if self.keep_browser_open:
+            logging.info("Browser will remain open when script finishes")
+        if self.first_page_only:
+            logging.info("TESTING MODE: Only processing listings from the first page")
 
     def apply_filters(self):
         """Apply filters for price and beds on the search results page"""
@@ -322,24 +334,138 @@ class ZillowScraper:
         logging.info("Sorting listings by newest first")
         self.sort_by_newest()
         
-        # Count listings found
-        listing_count = self.count_listings()
-        logging.info(f"Found {listing_count} listings in search results")
+        # Skip counting listings and proceed directly to inspection
+        logging.info("Skipping counting and proceeding directly to listing inspection")
         
-        # Process listings
-        logging.info("Starting to process listings")
-        self.process_all_listings(self.max_listings)
+        # Track total processed listings
+        total_processed = 0
+        page_num = 1
+        has_more_pages = True
+        
+        # Process all pages until we hit the maximum or run out of pages
+        while has_more_pages:
+            logging.info(f"Processing page {page_num} of search results")
+            
+            # If we have a maximum number of listings to process, calculate how many remain
+            remaining = self.max_listings - total_processed if self.max_listings > 0 else 0
+            
+            # Process listings on current page
+            # Before processing, let's do a thorough check of what's on the page
+            # This is for debugging purposes
+            listing_elements = self.driver.find_elements(By.XPATH, '//a[contains(@href, "/homedetails/")]')
+            valid_links = []
+            duplicate_links = []
+            
+            for e in listing_elements:
+                try:
+                    href = e.get_attribute('href')
+                    if href and '/homedetails/' in href:
+                        if href in self.processed_urls:
+                            duplicate_links.append(href)
+                        else:
+                            valid_links.append(href)
+                except:
+                    continue
+                    
+            logging.info(f"DEBUG: Page {page_num} analysis:")
+            logging.info(f"  - Total links with '/homedetails/': {len(listing_elements)}")
+            logging.info(f"  - New valid links: {len(valid_links)}")
+            logging.info(f"  - Already processed links: {len(duplicate_links)}")
+            logging.info(f"  - Total listings processed so far: {len(self.processed_urls)}")
+            
+            processed = self.process_all_listings(remaining if remaining > 0 else 0)
+            if processed:
+                total_processed += processed
+                logging.info(f"Processed {processed} listings on page {page_num}, total so far: {total_processed}")
+            
+            # If we've hit the maximum, stop
+            if self.max_listings > 0 and total_processed >= self.max_listings:
+                logging.info(f"Reached maximum number of listings to process ({self.max_listings})")
+                break
+                
+            # Check if we should stop after the first page
+            if self.first_page_only:
+                logging.info("TESTING MODE: Stopping after first page as requested")
+                has_more_pages = False
+            else:
+                # Try to navigate to the next page
+                has_more_pages = self.go_to_next_page()
+                if has_more_pages:
+                    page_num += 1
+                    time.sleep(5)  # Wait between page navigations
+                else:
+                    logging.info("No more pages to process")
+                
+        logging.info(f"Finished processing {total_processed} listings across {page_num} page(s)")
         
     def count_listings(self):
         """Count the number of listings in the search results"""
         logging.info("Counting listings in search results")
-        wait = WebDriverWait(self.driver, 10)
+        wait = WebDriverWait(self.driver, 15)
         
         try:
             # Wait for page to fully load and render all listings
             time.sleep(5)
             
-            # More specific selectors focusing on li elements within containers
+            # Primary selector: grid-search-results container (as specified by user)
+            try:
+                logging.info("Attempting to find listings using #grid-search-results > ul selector")
+                
+                # First, check if the container exists
+                grid_container = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#grid-search-results > ul"))
+                )
+                logging.info("Found #grid-search-results > ul container")
+                
+                # Method 1: Direct CSS selector
+                try:
+                    listings = self.driver.find_elements(By.CSS_SELECTOR, "#grid-search-results > ul > li")
+                    if listings and len(listings) > 0:
+                        logging.info(f"Found {len(listings)} listings using direct CSS selector")
+                        # Log some details about the first few listings
+                        for i in range(min(3, len(listings))):
+                            try:
+                                listing_id = listings[i].get_attribute("id") or "No ID"
+                                listing_class = listings[i].get_attribute("class") or "No class"
+                                logging.info(f"Listing {i+1} - ID: {listing_id}, Class: {listing_class}")
+                            except Exception as e:
+                                logging.debug(f"Error getting details for listing {i+1}: {str(e)}")
+                        return len(listings)
+                except Exception as e:
+                    logging.debug(f"Error with direct CSS selector: {str(e)}")
+                
+                # Method 2: Nth-child approach (count until we don't find any more)
+                try:
+                    count = 0
+                    for i in range(1, 100):  # Max 100 listings per page
+                        try:
+                            # Find each nth-child
+                            child_selector = f"#grid-search-results > ul > li:nth-child({i})"
+                            element = self.driver.find_element(By.CSS_SELECTOR, child_selector)
+                            count = i  # If we find this element, update the count
+                        except:
+                            break  # Stop when we can't find the next child
+                    
+                    if count > 0:
+                        logging.info(f"Found {count} listings using nth-child method")
+                        return count
+                except Exception as e:
+                    logging.debug(f"Error with nth-child approach: {str(e)}")
+                
+                # Method 3: Get all li elements directly from the container
+                try:
+                    listings = grid_container.find_elements(By.TAG_NAME, "li")
+                    if listings and len(listings) > 0:
+                        logging.info(f"Found {len(listings)} listings using container.find_elements")
+                        return len(listings)
+                except Exception as e:
+                    logging.debug(f"Error getting li elements from container: {str(e)}")
+                    
+            except Exception as e:
+                logging.warning(f"Could not find #grid-search-results > ul container: {str(e)}")
+            
+            # Fallback selectors if the primary one didn't work
+            logging.info("Falling back to alternative selectors")
             listing_selectors = [
                 '//ul[contains(@class, "photo-cards")]/li',
                 '//div[contains(@id, "search-results")]//li',
@@ -361,7 +487,7 @@ class ZillowScraper:
                         count = len(listings)
                         # Only return if we found a reasonable number of listings
                         if count > 5:
-                            logging.info(f"Found {count} listings using selector: {selector}")
+                            logging.info(f"Found {count} listings using fallback selector: {selector}")
                             return count
                         else:
                             logging.debug(f"Found only {count} listings with {selector}, trying other selectors")
@@ -394,27 +520,337 @@ class ZillowScraper:
         
         Args:
             max_listings: Maximum number of listings to process (0 for all listings)
+            
+        Returns:
+            int: Number of listings processed on this page
         """
         if max_listings > 0:
             logging.info(f"Processing up to {max_listings} listings on the page")
         else:
             logging.info("Processing all listings on the page")
             
-        wait = WebDriverWait(self.driver, 10)
-        processed_urls = set()  # Keep track of already processed URLs to avoid duplicates
+        wait = WebDriverWait(self.driver, 15)
+        # Use the class-level processed_urls to track across pages
+        
+        # Track processed elements for scrolling
+        processed_count = 0
+        scroll_batch_size = 5  # Process this many listings before scrolling
         
         try:
-            # Get all listing elements
+            # Store the main window handle for returning after each listing
+            main_window = self.driver.current_window_handle
+            
+            # First, try using the grid-search-results container to find all li elements directly
+            try:
+                logging.info("Looking for all li elements in #grid-search-results > ul container")
+                
+                # First, check if the container exists and wait for it
+                grid_container = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#grid-search-results > ul"))
+                )
+                logging.info("Found #grid-search-results > ul container")
+                
+                # Initial scroll to ensure page content is loaded
+                self.driver.execute_script("window.scrollTo(0, 300);")
+                time.sleep(1.5)
+                
+                # We need to handle lazy loading by scrolling and refreshing the list of elements
+                # First get an initial set of li elements
+                
+                # Function to scroll down to load more listings if needed
+                def scroll_to_load_more():
+                    logging.info("Scrolling down to load more listings...")
+                    # Scroll down 75% of the viewport height
+                    self.driver.execute_script("window.scrollBy(0, window.innerHeight * 0.75);")
+                    time.sleep(1.5)  # Allow time for new content to load
+                all_listing_elements = grid_container.find_elements(By.TAG_NAME, "li")
+                initial_count = len(all_listing_elements)
+                logging.info(f"Initially found {initial_count} li elements")
+                
+                # For very large pages, we'll scroll progressively and then get a complete list
+                total_scrolls = 0
+                
+                # Adjust scrolling based on how many listings we need
+                if max_listings > 0:
+                    # If we only need a small number of listings, do fewer scrolls
+                    max_scrolls = max(3, min(15, max_listings // 10))  # Scale scrolls based on max_listings
+                    logging.info(f"Will scroll up to {max_scrolls} times to find {max_listings} listings")
+                else:
+                    # Otherwise scroll the maximum number of times
+                    max_scrolls = 15
+                previous_height = self.driver.execute_script("return document.body.scrollHeight")
+                
+                while total_scrolls < max_scrolls:
+                    # Scroll down by a larger amount to ensure more content loads
+                    self.driver.execute_script("window.scrollBy(0, window.innerHeight * 0.9);")
+                    total_scrolls += 1
+                    logging.info(f"Performed scroll {total_scrolls}/{max_scrolls}")
+                    
+                    # Wait longer for the page to load content
+                    time.sleep(2)
+                    
+                    # Check if the page height has changed (indicating new content loaded)
+                    current_height = self.driver.execute_script("return document.body.scrollHeight")
+                    
+                    # Check if we have more listings after scrolling
+                    current_listings = grid_container.find_elements(By.TAG_NAME, "li")
+                    current_count = len(current_listings)
+                    
+                    if current_count > initial_count:
+                        logging.info(f"Scrolling revealed {current_count - initial_count} new listings (now have {current_count} total)")
+                        initial_count = current_count
+                    
+                    if current_height == previous_height:
+                        # If no new content after 2 consecutive scrolls, we've likely reached the end
+                        if total_scrolls >= 2:
+                            logging.info("No new content loaded after scrolling, likely reached the end")
+                            break
+                    else:
+                        previous_height = current_height
+                
+                # After scrolling, get the updated list of all li elements
+                all_listing_elements = grid_container.find_elements(By.TAG_NAME, "li")
+                logging.info(f"After scrolling, found {len(all_listing_elements)} li elements (vs initial {initial_count})")
+                
+                # Skip counting/sampling and go straight to processing each li element
+                logging.info("Beginning detailed inspection of each li element")
+                
+                # Process each li element
+                processed_count = 0
+                scroll_batch_size = 5  # Scroll after processing this many elements
+                
+                # Define a function to scroll more while processing if we're near the end
+                def scroll_more_if_needed(current_index, total_elements):
+                    # If we're 80% through the visible elements, try to scroll for more
+                    if current_index > total_elements * 0.8:
+                        logging.info(f"Near end of visible listings ({current_index}/{total_elements}), scrolling for more...")
+                        # Scroll to reveal more content
+                        self.driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
+                        time.sleep(2)  # Give time for new content to load
+                        
+                        # Refresh our list of elements
+                        new_elements = grid_container.find_elements(By.TAG_NAME, "li")
+                        if len(new_elements) > len(all_listing_elements):
+                            logging.info(f"Scrolling revealed {len(new_elements) - len(all_listing_elements)} new listings")
+                            return new_elements
+                    return all_listing_elements
+                
+                for i, listing_element in enumerate(all_listing_elements):
+                    try:
+                        # Stop if we've reached the maximum number of listings to process
+                        if max_listings > 0 and processed_count >= max_listings:
+                            logging.info(f"Reached maximum number of listings to process ({max_listings})")
+                            break
+                            
+                        # Every 10 elements, check if we need to scroll more to reveal new listings
+                        if i > 0 and i % 10 == 0:
+                            new_elements = scroll_more_if_needed(i, len(all_listing_elements))
+                            if len(new_elements) > len(all_listing_elements):
+                                # We found new elements! Update our list and continue with the new elements
+                                # Note: This changes our loop behavior, but we'll continue with the current element
+                                all_listing_elements = new_elements
+                                logging.info(f"Updated listing elements list, now processing {len(all_listing_elements)} elements")
+                        
+                        # Scroll current element into view if it's part of a new batch
+                        # This ensures the element is fully rendered before we try to interact with it
+                        if processed_count > 0 and processed_count % scroll_batch_size == 0:
+                            try:
+                                # Scroll the current element into center view
+                                logging.info(f"Scrolling element {i+1} into view (batch {processed_count // scroll_batch_size + 1})")
+                                self.driver.execute_script(
+                                    "arguments[0].scrollIntoView({behavior: 'auto', block: 'center'});",
+                                    listing_element
+                                )
+                                # Wait briefly for content to load after scrolling
+                                time.sleep(1)
+                            except Exception as e:
+                                logging.warning(f"Error scrolling to element {i+1}: {str(e)}")
+                        
+                        # Extract element info for debugging
+                        try:
+                            element_id = listing_element.get_attribute("id") or "No ID"
+                            element_class = listing_element.get_attribute("class") or "No class"
+                            logging.info(f"Processing li element {i+1}/{len(all_listing_elements)} - ID: {element_id}, Class: {element_class}")
+                        except:
+                            logging.info(f"Processing li element {i+1}/{len(all_listing_elements)}")
+                            
+                        # Check if this appears to be a valid property card
+                        # Skip this validation if debug-all-li flag is set
+                        if not hasattr(self, 'debug_all_li') or not self.debug_all_li:
+                            is_valid = self.is_valid_property_card(listing_element)
+                            if not is_valid:
+                                logging.info(f"Skipping element {i+1} - doesn't appear to be a valid property card")
+                                continue
+                            else:
+                                logging.info(f"Element {i+1} appears to be a valid property card")
+                        else:
+                            logging.info(f"Processing all li elements in debug mode (element {i+1})")
+                        
+                        # Find a valid listing URL using multiple strategies
+                        listing_url = None
+                        
+                        # Strategy 1: Look for property-card data attribute and extract link directly
+                        try:
+                            # Check if this is a real listing by looking for property-card
+                            property_card = None
+                            
+                            # Try multiple selectors to find property card elements
+                            for selector in [
+                                ".//*[@data-test='property-card']", 
+                                ".//article[@role='presentation']",
+                                ".//div[contains(@class,'PropertyCard')]",
+                                ".//div[contains(@class,'property-card')]"
+                            ]:
+                                try:
+                                    property_card = listing_element.find_element(By.XPATH, selector)
+                                    if property_card:
+                                        logging.info(f"Found property card in listing {i+1} using selector: {selector}")
+                                        break
+                                except:
+                                    continue
+                            
+                            if property_card:
+                                # First try to find a direct homedetails link
+                                homedetails_links = listing_element.find_elements(
+                                    By.XPATH, ".//a[contains(@href, '/homedetails/')]"
+                                )
+                                if homedetails_links:
+                                    for link in homedetails_links:
+                                        href = link.get_attribute("href")
+                                        if href and '/homedetails/' in href:
+                                            listing_url = href
+                                            logging.info(f"Found homedetails link in listing {i+1}: {listing_url}")
+                                            break
+                                            
+                                # If no direct link, try to extract from schema.org data
+                                if not listing_url:
+                                    try:
+                                        # Look for schema.org JSON data
+                                        script_elements = listing_element.find_elements(By.XPATH, ".//script[@type='application/ld+json']")
+                                        for script in script_elements:
+                                            try:
+                                                json_text = script.get_attribute("innerHTML")
+                                                json_data = json.loads(json_text)
+                                                if 'url' in json_data and '/homedetails/' in json_data['url']:
+                                                    listing_url = json_data['url']
+                                                    logging.info(f"Extracted URL from JSON data: {listing_url}")
+                                                    break
+                                            except:
+                                                continue
+                                    except:
+                                        pass
+                                        
+                                # If still no URL, try to extract ZPID from element
+                                if not listing_url:
+                                    try:
+                                        # Try to extract zpid from element attributes
+                                        zpid = None
+                                        for attr in ['id', 'data-zpid', 'data-test-id']:
+                                            attr_value = property_card.get_attribute(attr)
+                                            if attr_value and 'zpid' in attr_value:
+                                                zpid_match = re.search(r'(\d+)', attr_value)
+                                                if zpid_match:
+                                                    zpid = zpid_match.group(1)
+                                                    listing_url = f"https://www.zillow.com/homedetails/{zpid}_zpid/"
+                                                    logging.info(f"Constructed URL from zpid for listing {i+1}: {listing_url}")
+                                                    break
+                                    except:
+                                        pass
+                        except Exception as e:
+                            logging.debug(f"Error in strategy 1 for listing {i+1}: {str(e)}")
+                        
+                        # Strategy 2: Find any link that might be a property link
+                        if not listing_url:
+                            try:
+                                # Look for any links with href
+                                all_links = listing_element.find_elements(By.TAG_NAME, "a")
+                                for link in all_links:
+                                    try:
+                                        href = link.get_attribute("href")
+                                        if href and '/homedetails/' in href:
+                                            listing_url = href
+                                            logging.info(f"Found property link in listing {i+1}: {listing_url}")
+                                            break
+                                    except:
+                                        continue
+                            except Exception as e:
+                                logging.debug(f"Error in strategy 2 for listing {i+1}: {str(e)}")
+                        
+                        # Skip if we couldn't find a URL
+                        if not listing_url:
+                            logging.warning(f"Skipping listing {i+1} - No valid URL found")
+                            continue
+                            
+                        # Skip if we've already processed this URL
+                        if listing_url in self.processed_urls:
+                            logging.info(f"Skipping already processed URL: {listing_url}")
+                            continue
+                            
+                        logging.info(f"Opening listing {i+1} URL: {listing_url}")
+                        
+                        # Add to processed URLs set
+                        self.processed_urls.add(listing_url)
+                        
+                        # Open in a new tab
+                        try:
+                            # Open new tab with JavaScript
+                            self.driver.execute_script(f"window.open('{listing_url}', '_blank');")
+                            
+                            # Switch to the new tab
+                            wait.until(lambda d: len(d.window_handles) > 1)
+                            self.driver.switch_to.window(self.driver.window_handles[-1])
+                            
+                            # Wait for page to load
+                            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                            time.sleep(random.uniform(2.0, 3.0))  # Additional wait for elements to load
+                            
+                            # Extract listing data
+                            self.extract_listing_data(listing_url)
+                            
+                            # Close the tab and switch back to main window
+                            self.driver.close()
+                            self.driver.switch_to.window(main_window)
+                            
+                            # Increment processed count
+                            processed_count += 1
+                            
+                            # Add a random delay between listings
+                            time.sleep(random.uniform(1.5, 3.0))
+                            
+                        except Exception as e:
+                            logging.error(f"Error processing listing {i+1}: {str(e)}")
+                            # Make sure we're back on the main window
+                            if main_window in self.driver.window_handles:
+                                self.driver.switch_to.window(main_window)
+                            
+                    except Exception as e:
+                        logging.error(f"Error processing listing element {i+1}: {str(e)}")
+                        # Make sure we're back on the main window
+                        if main_window in self.driver.window_handles:
+                            self.driver.switch_to.window(main_window)
+                
+                logging.info(f"Processed {processed_count} listings from grid container")
+                return processed_count
+                
+            except Exception as e:
+                logging.error(f"Error with grid-search-results approach: {str(e)}")
+            
+            # If the above method failed, fall back to original selectors
+            logging.info("Falling back to original selectors")
             listing_selectors = [
-                # Find all listings with these selectors
+                # These selectors find the actual <a> link elements for the listings
+                '//ul[contains(@class, "photo-cards")]/li//a[contains(@href, "/homedetails/")]',
+                '//div[contains(@id, "search-results")]//li//a[contains(@href, "/homedetails/")]',
+                '//div[contains(@class, "search-results")]//li//a[contains(@href, "/homedetails/")]',
+                '//div[contains(@class, "result-list")]//li//a[contains(@href, "/homedetails/")]',
+                '//ul[contains(@class, "List")]//li//a[contains(@href, "/homedetails/")]',
+                '//div[@data-testid="search-result-list"]//li//a[contains(@href, "/homedetails/")]',
+                '//main//ul//li[contains(@class, "ListItem")]//a[contains(@href, "/homedetails/")]',
+                '//main//div[contains(@class, "StyledPropertyCardDataWrapper")]//a[contains(@href, "/homedetails/")]',
+                # Original selectors as fallback
                 '//div[contains(@class, "property-card")]/a',
                 '//ul[contains(@class, "photo-cards")]//li//a[contains(@class, "property-card")]',
-                '//li[contains(@class, "ListItem")]//a',
-                '//div[contains(@class, "StyledPropertyCardDataWrapper")]//a',
-                '//li[contains(@class, "search-result")]//a',
-                '//article[contains(@class, "property-card")]//a',
-                '//div[contains(@class, "list-card")]//a',
-                '//div[@data-test="property-card"]//a'
+                '//article[contains(@class, "property-card")]//a'
             ]
             
             # Try each selector until we find listings
@@ -423,15 +859,27 @@ class ZillowScraper:
                 try:
                     listings = self.driver.find_elements(By.XPATH, selector)
                     if len(listings) > 0:
-                        all_listings = listings
-                        logging.info(f"Found {len(listings)} listings with selector: {selector}")
-                        break
+                        # Check if these are valid listing links
+                        valid_listings = []
+                        for listing in listings:
+                            try:
+                                href = listing.get_attribute('href')
+                                if href and '/homedetails/' in href:
+                                    valid_listings.append(listing)
+                            except:
+                                continue
+                                
+                        # Only use this selector if we found valid listings
+                        if len(valid_listings) > 0:
+                            all_listings = valid_listings
+                            logging.info(f"Found {len(valid_listings)} valid listings with selector: {selector}")
+                            break
                 except Exception as e:
                     logging.warning(f"Failed to find listings with selector {selector}: {str(e)}")
             
             if not all_listings:
                 logging.warning("Could not find any listings with the provided selectors")
-                return False
+                return 0
             
             # Determine how many listings to process
             if max_listings > 0:
@@ -453,10 +901,19 @@ class ZillowScraper:
                     # Get listing URL before clicking
                     try:
                         listing_url = listing.get_attribute('href')
-                        if not listing_url or listing_url in processed_urls:
-                            continue  # Skip if no URL or already processed
+                        # Validate it's a proper listing URL
+                        if not listing_url:
+                            logging.debug(f"Skipping empty URL at position {i+1}")
+                            continue
+                        elif '/homedetails/' not in listing_url:
+                            logging.debug(f"Skipping non-property URL: {listing_url}")
+                            continue
+                        elif listing_url in self.processed_urls:
+                            logging.debug(f"Skipping already processed URL: {listing_url}")
+                            continue
                         
-                        processed_urls.add(listing_url)
+                        logging.info(f"Adding new listing URL to processed set: {listing_url}")
+                        self.processed_urls.add(listing_url)
                     except Exception as e:
                         logging.warning(f"Could not get URL for listing {i+1}: {str(e)}")
                         continue
@@ -502,11 +959,12 @@ class ZillowScraper:
                     logging.error(f"Unexpected error processing listing {i+1}: {str(e)}")
                     # Continue with next listing rather than stopping
             
-            return True
+            logging.info(f"Successfully processed {processed_count} listings on this page")
+            return processed_count
                 
         except Exception as e:
             logging.error(f"Error processing listings: {str(e)}")
-            return False
+            return 0
             
     def open_first_listing(self):
         """Open the first listing in the search results"""
@@ -770,6 +1228,19 @@ class ZillowScraper:
                     
             # Extract days on market
             dom_selectors = [
+                # Based on the HTML structure with StyledOverviewStats
+                '//dl[contains(@class, "StyledOverviewStats")]/dt[1]/strong',
+                '//dl[contains(@class, "StyledOverviewStats")]/dt[1]/strong[contains(text(), "day") or contains(text(), "days")]',
+                # Additional selectors for newer HTML structure
+                '//dl[contains(@class, "kpgmGL")]/dt[1]/strong',
+                '//dl/dt[1]/strong[contains(text(), "day") or contains(text(), "days")]',
+                # More generic selectors that look for the first strong tag within dt that contains "days"
+                '//dt/strong[contains(text(), "day") or contains(text(), "days")]',
+                # Previous specific XPath
+                '//*[@id="search-detail-lightbox"]/div[1]/div[1]/div[1]/section/div/div[3]/div[1]/div[1]/dl/dt[1]/strong',
+                # Additional XPath selectors for the same element with slight variations
+                '//section//dl/dt/strong[contains(text(), "day") or contains(text(), "Day")]',
+                # Previous selectors as fallbacks
                 '//div[contains(text(), "Days on") or contains(text(), "day on")]/span',
                 '//span[contains(text(), "Days on") or contains(text(), "day on")]/following-sibling::span',
                 '//span[contains(text(), "Listed:")]',
@@ -781,13 +1252,22 @@ class ZillowScraper:
                     dom_elem = self.driver.find_element(By.XPATH, selector)
                     dom_text = dom_elem.text.strip()
                     if dom_text:
-                        # Try to extract just the number
-                        dom_match = re.search(r'\d+', dom_text)
+                        logging.info(f"Raw days on market text: '{dom_text}'")
+                        # Try to extract just the number followed by "day" or "days"
+                        dom_match = re.search(r'(\d+)\s*days?', dom_text, re.IGNORECASE)
                         if dom_match:
-                            data['DAYS_ON_MARKET'] = dom_match.group(0)
+                            data['DAYS_ON_MARKET'] = dom_match.group(1)  # Get just the number
                             logging.info(f"Found days on market: {data['DAYS_ON_MARKET']}")
                             break
-                except Exception:
+                        else:
+                            # Fall back to just getting any number if the format isn't exactly as expected
+                            dom_match = re.search(r'(\d+)', dom_text)
+                            if dom_match:
+                                data['DAYS_ON_MARKET'] = dom_match.group(1)
+                                logging.info(f"Found days on market (fallback method): {data['DAYS_ON_MARKET']}")
+                                break
+                except Exception as e:
+                    logging.debug(f"Error with DOM selector '{selector}': {str(e)}")
                     continue
                     
             # Extract agent information using the specific element
@@ -883,16 +1363,358 @@ class ZillowScraper:
                 logging.info(f"Data saved to {self.output_file}")
         except Exception as e:
             logging.error(f"Error saving data to CSV: {str(e)}")
+            
+    def go_to_next_page(self):
+        """Navigate to the next page of search results if available"""
+        logging.info("Attempting to navigate to the next page of results")
+        wait = WebDriverWait(self.driver, 10)
+        
+        # Various selectors for "Next" buttons or pagination elements
+        next_page_selectors = [
+            '//a[contains(@title, "Next page") or contains(@aria-label, "Next page")]',
+            '//a[contains(@class, "next") or contains(@class, "Next")]',
+            '//button[contains(@title, "Next") or contains(@aria-label, "Next")]',
+            '//button[contains(text(), "Next")]',
+            '//a[contains(text(), "Next")]',
+            '//li[contains(@class, "next")]/a',
+            '//span[contains(@class, "next")]/a',
+            '//nav[contains(@class, "pagination")]//a[contains(@class, "next")]',
+            '//span[contains(@class, "PaginationButton") and contains(text(), ">")]',
+            '//button[@data-testid="pagination-next-btn" or contains(@class, "pagination-next")]',
+            # Common arrow icons that might indicate next page
+            '//a[contains(@class, "next-page") or contains(@class, "nextPage")]',
+            '//button[.//*[local-name()="svg" and contains(@class, "arrow-right")]]',
+            '//button[.//*[contains(@class, "icon-right")]]'
+        ]
+        
+        for selector in next_page_selectors:
+            try:
+                next_button = self.driver.find_element(By.XPATH, selector)
+                
+                # Check if the button is disabled or not clickable
+                if next_button.get_attribute("disabled") == "true" or "disabled" in next_button.get_attribute("class") or not next_button.is_displayed():
+                    logging.info("Next page button is disabled or not available - reached the last page")
+                    return False
+                
+                # Scroll into view for better visibility
+                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", next_button)
+                time.sleep(2)
+                
+                # Try to click
+                logging.info(f"Found next page button with selector: {selector}")
+                next_button.click()
+                
+                # Wait for page to load
+                time.sleep(5)
+                wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
+                
+                # Additional wait for elements to render
+                time.sleep(3)
+                
+                logging.info("Successfully navigated to the next page")
+                return True
+                
+            except Exception as e:
+                logging.warning(f"Failed to click next page button with selector {selector}: {str(e)}")
+                continue
+        
+        logging.info("No next page button found - likely reached the last page")
+        return False
+    
+    def go_to_next_page(self):
+        """Navigate to the next page of search results
+        
+        Returns:
+            bool: True if navigation was successful, False otherwise
+        """
+        logging.info("Attempting to navigate to the next page")
+        
+        try:
+            # Wait a bit to ensure the page is fully loaded
+            time.sleep(3)
+            
+            # Try different selectors for the next page button
+            next_page_selectors = [
+                '//a[@title="Next page"]',
+                '//a[contains(@class, "next")]',
+                '//button[contains(@aria-label, "Next page")]',
+                '//button[contains(text(), "Next")]',
+                '//a[contains(text(), "Next")]',
+                '//span[contains(text(), "Next")]/parent::*',
+                '//button[contains(@class, "PaginationButton") and contains(@aria-label, "Next")]',
+                '//li[contains(@class, "PaginationJumpItem")]/following-sibling::li//button'
+            ]
+            
+            for selector in next_page_selectors:
+                try:
+                    next_button = self.driver.find_element(By.XPATH, selector)
+                    if next_button.is_displayed() and next_button.is_enabled():
+                        logging.info(f"Found next page button with selector: {selector}")
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
+                        time.sleep(1)
+                        next_button.click()
+                        
+                        # Wait for the page to load
+                        time.sleep(5)
+                        logging.info("Navigated to the next page successfully")
+                        return True
+                except Exception as e:
+                    logging.debug(f"Next page selector {selector} failed: {str(e)}")
+                    continue
+            
+            logging.info("No next page button found - likely on the last page")
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error navigating to next page: {str(e)}")
+            return False
+    
+    def extract_schema_data(self, element):
+        """
+        Extract listing data from schema.org JSON-LD in the listing element
+        
+        Args:
+            element: Selenium WebElement containing the listing
+            
+        Returns:
+            dict: Extracted schema.org data or empty dict if none found
+        """
+        try:
+            # Look for schema.org JSON data in script tags
+            script_elements = element.find_elements(By.XPATH, ".//script[@type='application/ld+json']")
+            if not script_elements:
+                return {}
+                
+            for script in script_elements:
+                try:
+                    # Get the JSON content
+                    json_text = script.get_attribute("innerHTML")
+                    if not json_text:
+                        continue
+                        
+                    # Parse the JSON data
+                    json_data = json.loads(json_text)
+                    
+                    # Check if this is property data with expected fields
+                    if '@type' not in json_data or 'url' not in json_data:
+                        continue
+                        
+                    if json_data['@type'] not in ['SingleFamilyResidence', 'Apartment', 'House']:
+                        continue
+                        
+                    # Extract relevant fields
+                    property_data = {
+                        'property_url': json_data.get('url', ''),
+                        'address': json_data.get('name', '')
+                    }
+                    
+                    # Extract address details
+                    if 'address' in json_data and isinstance(json_data['address'], dict):
+                        addr = json_data['address']
+                        property_data.update({
+                            'street': addr.get('streetAddress', ''),
+                            'city': addr.get('addressLocality', ''),
+                            'state': addr.get('addressRegion', ''),
+                            'zip': addr.get('postalCode', '')
+                        })
+                    
+                    # Extract floor size if available
+                    if 'floorSize' in json_data and isinstance(json_data['floorSize'], dict):
+                        size_value = json_data['floorSize'].get('value', '')
+                        # Remove any commas from the value
+                        if isinstance(size_value, str):
+                            size_value = size_value.replace(',', '')
+                        try:
+                            property_data['sqft'] = int(float(size_value))
+                        except (ValueError, TypeError):
+                            property_data['sqft'] = size_value
+                    
+                    # Extract bedrooms count
+                    if 'numberOfRooms' in json_data:
+                        try:
+                            property_data['beds'] = int(json_data['numberOfRooms'])
+                        except (ValueError, TypeError):
+                            property_data['beds'] = json_data['numberOfRooms']
+                    
+                    # Extract geographic coordinates
+                    if 'geo' in json_data and isinstance(json_data['geo'], dict):
+                        geo = json_data['geo']
+                        property_data.update({
+                            'latitude': geo.get('latitude', ''),
+                            'longitude': geo.get('longitude', '')
+                        })
+                    
+                    # Validate we have a property URL that contains homedetails
+                    if property_data.get('property_url') and '/homedetails/' in property_data['property_url']:
+                        logging.info(f"Successfully extracted schema.org data: {property_data}")
+                        return property_data
+                
+                except Exception as e:
+                    logging.debug(f"Error parsing schema.org data: {str(e)}")
+                    continue
+                    
+            return {}
+            
+        except Exception as e:
+            logging.debug(f"Error extracting schema.org data: {str(e)}")
+            return {}
+    
+    def is_valid_property_card(self, element):
+        """
+        Check if a li element is a valid property card listing
+        
+        Args:
+            element: Selenium WebElement to check
+            
+        Returns:
+            bool: True if the element appears to be a valid property card
+        """
+        try:
+            # First check: Any <li> element that has an <article> element is a valid listing
+            try:
+                article_elements = element.find_elements(By.TAG_NAME, "article")
+                if article_elements:
+                    logging.debug("Valid listing identified by presence of article element")
+                    return True
+            except:
+                pass
+                
+            # Analyze the class attributes next - reliable indicator
+            try:
+                class_name = element.get_attribute("class") or ""
+                # Based on your examples, all valid listings have both these classes
+                if "ListItem-c11n-8-109-3__sc-13rwu5a-0" in class_name and "StyledListCardWrapper-srp-8-109-3__sc-r47yyl-0" in class_name:
+                    logging.debug("Valid listing identified by ListItem and StyledListCardWrapper classes")
+                    return True
+            except:
+                pass
+                
+            # Check for script with ld+json (schema.org data) - Very strong indicator
+            # All example listings had this element with property data
+            try:
+                schema_scripts = element.find_elements(By.XPATH, ".//script[@type='application/ld+json']")
+                if schema_scripts:
+                    for script in schema_scripts:
+                        try:
+                            json_text = script.get_attribute("innerHTML")
+                            if json_text and ('homedetails' in json_text or 'SingleFamilyResidence' in json_text):
+                                logging.debug("Valid listing identified by schema.org data")
+                                return True
+                        except:
+                            pass
+            except:
+                pass
+                
+            # Check for article with data-test="property-card" - Very reliable
+            # All example listings had this element
+            try:
+                property_articles = element.find_elements(By.XPATH, ".//article[@data-test='property-card']")
+                if property_articles:
+                    logging.debug("Valid listing identified by article with data-test=property-card")
+                    return True
+            except:
+                pass
+                
+            # Check for presence of address element - All listings had this
+            try:
+                address_elements = element.find_elements(By.TAG_NAME, "address")
+                if address_elements:
+                    logging.debug("Valid listing identified by address element")
+                    return True
+            except:
+                pass
+                
+            # Check for price element
+            try:
+                price_elements = element.find_elements(
+                    By.XPATH, ".//*[@data-test='property-card-price']"
+                )
+                if price_elements:
+                    logging.debug("Valid listing identified by property-card-price element")
+                    return True
+            except:
+                pass
+                
+            # Check for homedetails URL in any link
+            try:
+                links = element.find_elements(By.TAG_NAME, "a")
+                for link in links:
+                    href = link.get_attribute("href")
+                    if href and '/homedetails/' in href:
+                        logging.debug("Valid listing identified by homedetails URL")
+                        return True
+            except:
+                pass
+                
+            # Check for property-card-data class which contains listing details
+            try:
+                data_wrappers = element.find_elements(
+                    By.XPATH, ".//*[contains(@class, 'property-card-data')]"
+                )
+                if data_wrappers:
+                    logging.debug("Valid listing identified by property-card-data class")
+                    return True
+            except:
+                pass
+                
+            # Look for bed/bath/sqft indicators - All valid listings had these
+            try:
+                details_list = element.find_elements(
+                    By.XPATH, ".//ul[contains(@class, 'StyledPropertyCardHomeDetailsList')]"
+                )
+                if details_list:
+                    logging.debug("Valid listing identified by StyledPropertyCardHomeDetailsList")
+                    return True
+            except:
+                pass
+                
+            # Check for zpid in any element (very specific to property listings)
+            try:
+                elements_with_zpid = element.find_elements(By.XPATH, ".//*[contains(@id, 'zpid_')]")
+                if elements_with_zpid:
+                    logging.debug("Valid listing identified by zpid element")
+                    return True
+            except:
+                pass
+                
+            # Last resort: Check for combination of indicators in HTML
+            try:
+                html = element.get_attribute("outerHTML") or ""
+                # Core indicators that must be present for valid listings
+                required_indicators = ['homedetails', 'zpid']
+                # Secondary indicators where at least a few should be present
+                secondary_indicators = ['property-card', 'address', 'price', 'bds', 'ba', 'sqft', 'StyledPropertyCard']
+                
+                # Check for required indicators (must have at least one)
+                required_hits = sum(1 for indicator in required_indicators if indicator in html.lower())
+                secondary_hits = sum(1 for indicator in secondary_indicators if indicator in html.lower())
+                
+                if required_hits > 0 and secondary_hits >= 3:
+                    logging.debug(f"Valid listing identified by HTML indicators (required: {required_hits}, secondary: {secondary_hits})")
+                    return True
+            except:
+                pass
+                
+            # If we got here, it's probably not a valid listing
+            logging.debug("Element not identified as a valid listing")
+            return False
+            
+        except Exception as e:
+            logging.debug(f"Error checking if element is a property card: {str(e)}")
+            return False
     
     def close(self):
         """Close the browser and clean up resources"""
         if hasattr(self, 'driver'):
-            logging.info("Closing browser session")
-            try:
-                self.driver.quit()
-                logging.info("Browser session closed successfully")
-            except Exception as e:
-                logging.error(f"Error closing browser: {str(e)}")
+            if self.keep_browser_open:
+                logging.info("Keeping browser session open as requested")
+            else:
+                logging.info("Closing browser session")
+                try:
+                    self.driver.quit()
+                    logging.info("Browser session closed successfully")
+                except Exception as e:
+                    logging.error(f"Error closing browser: {str(e)}")
 
 if __name__ == "__main__":
     import argparse
@@ -900,6 +1722,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Zillow Property Scraper')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retries per zipcode')
     parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')
+    parser.add_argument('--keep-browser-open', action='store_true', help='Keep browser open when the script finishes')
+    parser.add_argument('--first-page-only', action='store_true', help='Only process listings from the first page (for testing)')
+    parser.add_argument('--zipcode', type=str, help='Specific zipcode to process (overrides the default list)')
+    parser.add_argument('--debug-all-li', action='store_true', help='Debug mode: process all li elements as potential listings')
     args = parser.parse_args()
     
     # Chrome options
@@ -910,11 +1736,13 @@ if __name__ == "__main__":
     options.add_argument('--start-maximized')
     
     # Create the scraper instance with our options
-    bot = ZillowScraper(options, args.max_listings)
+    bot = ZillowScraper(options, args.max_listings, args.keep_browser_open, args.first_page_only, args.debug_all_li)
     
     try:
+        # Use the zipcode from command line if provided, otherwise use the predefined list
+        zipcode_list = [args.zipcode] if args.zipcode else ZIPCODES
         
-        for zipcode in ZIPCODES:
+        for zipcode in zipcode_list:
             logging.info(f"Processing zipcode: {zipcode}")
             retry_count = 0
             success = False
