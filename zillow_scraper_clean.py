@@ -2153,7 +2153,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Zillow Property Scraper')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retries per zipcode')
-    parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')
+    parser.add_argument('--max-listings', type=int, default=5, help='Maximum number of listings to process per zipcode (0 for all listings)')  # Changed default to 5 for testing
     parser.add_argument('--keep-browser-open', action='store_true', help='Keep browser open when the script finishes')
     parser.add_argument('--first-page-only', action='store_true', help='Only process listings from the first page (for testing)')
     parser.add_argument('--zipcode', type=str, help='Specific zipcode to process (overrides the default list)')
@@ -2226,7 +2226,276 @@ if __name__ == "__main__":
         logging.error("Summary: Script execution failed due to unexpected error")
     else:
         logging.info("Summary: Script execution completed successfully")
+        
+        # New logic: search for agents on Nestfully after scraping listings
+        try:
+            logging.info("Starting Nestfully agent search...")
+            
+            # Read the CSV file
+            csv_file = bot.output_file
+            agent_data = []
+            
+            if os.path.exists(csv_file):
+                with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row['AGENT_NAME']:  # Only add entries with agent names
+                            agent_data.append(row)
+            
+            if agent_data:
+                logging.info(f"Found {len(agent_data)} agents in CSV to search on Nestfully")
+                
+                # Verify we have a valid browser before proceeding
+                if not bot.driver:
+                    logging.error("No valid browser available for Nestfully search")
+                    raise Exception("No valid browser available")
+                
+                # Continue using the existing browser instance - don't create a new one
+                # This avoids ChromeDriver version compatibility issues
+                logging.info("Using existing browser instance for Nestfully agent searches")
+                
+                # Process each agent
+                for index, agent_row in enumerate(agent_data):
+                    try:
+                        agent_name = agent_row['AGENT_NAME'].strip()
+                        if not agent_name:
+                            continue
+                            
+                        # Split into first and last name
+                        name_parts = agent_name.split()
+                        if len(name_parts) >= 2:
+                            first_name = name_parts[0]
+                            last_name = name_parts[-1]
+                            
+                            logging.info(f"Searching for agent: {first_name} {last_name} ({index+1}/{len(agent_data)})")
+                            
+                            # Navigate to Nestfully agent search
+                            bot.driver.get("https://www.nestfully.com/")
+                            time.sleep(random.uniform(2.0, 4.0))
+                            
+                            # Wait for the page to load
+                            wait = WebDriverWait(bot.driver, 10)
+                            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                            
+                            # Look for find agent link/button if we're on homepage
+                            try:
+                                # Try different possible elements for "Find an Agent" navigation
+                                find_agent_selectors = [
+                                    "//a[contains(text(), 'Find an Agent') or contains(text(), 'Find Agent')]",
+                                    "//a[contains(@href, 'agent') and contains(@href, 'search')]",
+                                    "//button[contains(text(), 'Find an Agent') or contains(text(), 'Find Agent')]",
+                                    "//nav//a[contains(text(), 'Agent')]"
+                                ]
+                                
+                                for selector in find_agent_selectors:
+                                    try:
+                                        find_agent_elem = bot.driver.find_element(By.XPATH, selector)
+                                        if find_agent_elem and find_agent_elem.is_displayed():
+                                            logging.info(f"Found 'Find Agent' navigation element, clicking it")
+                                            find_agent_elem.click()
+                                            time.sleep(2)
+                                            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                                            break
+                                    except:
+                                        continue
+                            except Exception as e:
+                                logging.warning(f"Could not find agent search navigation: {str(e)}")
+                            
+                            # Find and fill first name field
+                            try:
+                                # Try different possible input field selectors
+                                first_name_selectors = [
+                                    (By.ID, "Master_FirstName"),
+                                    (By.XPATH, "//input[@placeholder='First Name...']"),
+                                    (By.XPATH, "//input[contains(@name, 'FirstName')]"),
+                                    (By.XPATH, "//input[contains(@id, 'FirstName')]"),
+                                    (By.XPATH, "//label[contains(text(), 'First')]/following-sibling::input"),
+                                    (By.XPATH, "//label[contains(text(), 'First')]/..//input")
+                                ]
+                                
+                                first_name_field = None
+                                for selector in first_name_selectors:
+                                    try:
+                                        first_name_field = wait.until(EC.presence_of_element_located(selector))
+                                        if first_name_field and first_name_field.is_displayed():
+                                            logging.info(f"Found first name input with selector: {selector}")
+                                            break
+                                    except:
+                                        continue
+                                        
+                                if not first_name_field:
+                                    raise Exception("Could not find first name input field")
+                                
+                                first_name_field.clear()
+                                first_name_field.send_keys(first_name)
+                                logging.info(f"Entered first name: {first_name}")
+                                
+                                # Find and fill last name field - try multiple selectors
+                                last_name_selectors = [
+                                    (By.ID, "Master_LastName"),
+                                    (By.XPATH, "//input[@placeholder='Last Name...']"),
+                                    (By.XPATH, "//input[contains(@name, 'LastName')]"),
+                                    (By.XPATH, "//input[contains(@id, 'LastName')]"),
+                                    (By.XPATH, "//label[contains(text(), 'Last')]/following-sibling::input"),
+                                    (By.XPATH, "//label[contains(text(), 'Last')]/..//input")
+                                ]
+                                
+                                last_name_field = None
+                                for selector in last_name_selectors:
+                                    try:
+                                        last_name_field = bot.driver.find_element(*selector)
+                                        if last_name_field and last_name_field.is_displayed():
+                                            logging.info(f"Found last name input with selector: {selector}")
+                                            break
+                                    except:
+                                        continue
+                                
+                                if not last_name_field:
+                                    raise Exception("Could not find last name input field")
+                                    
+                                last_name_field.clear()
+                                last_name_field.send_keys(last_name)
+                                logging.info(f"Entered last name: {last_name}")
+                                
+                                # Send Enter key to submit the form instead of clicking a button
+                                last_name_field.send_keys(Keys.RETURN)
+                                logging.info("Pressed Enter key to submit the search")
+                                
+                                # Wait for results to load
+                                time.sleep(random.uniform(3.0, 5.0))
+                                wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                                
+                                # Try to find and click on the agent's name link in search results
+                                found_agent_link = False
+                                agent_email = None
+                                
+                                try:
+                                    # Try different selectors to find the agent link
+                                    agent_link_selectors = [
+                                        f"//a[contains(text(), '{first_name}') and contains(text(), '{last_name}')]",
+                                        f"//a[contains(text(), '{agent_name}')]",
+                                        f"//a[contains(@class, 'detail-page') and contains(text(), '{last_name}')]",
+                                        f"//a[contains(@href, '{first_name}{last_name}') or contains(@href, '{first_name}-{last_name}')]",
+                                        "//a[contains(@class, 'ao_results_icon_text')]",
+                                        "//a[contains(@class, 'detail-page')]"
+                                    ]
+                                    
+                                    for selector in agent_link_selectors:
+                                        try:
+                                            agent_links = bot.driver.find_elements(By.XPATH, selector)
+                                            if agent_links:
+                                                for link in agent_links:
+                                                    if link.is_displayed() and (first_name.lower() in link.text.lower() or last_name.lower() in link.text.lower()):
+                                                        logging.info(f"Found agent link: {link.text}")
+                                                        link.click()
+                                                        found_agent_link = True
+                                                        
+                                                        # Wait for detail page to load
+                                                        time.sleep(random.uniform(2.0, 4.0))
+                                                        wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                                                        
+                                                        # Try to extract email address
+                                                        email_selectors = [
+                                                            "//a[@id='hlAgentEmailAddress']",
+                                                            "//a[contains(@href, 'AgentEmailAddress')]",
+                                                            "//a[contains(@href, 'mailto:')]",
+                                                            "//a[contains(text(), '@') and contains(text(), '.com')]",
+                                                            "//span[contains(text(), '@') and contains(text(), '.com')]",
+                                                            "//div[contains(text(), '@') and contains(text(), '.com')]"
+                                                        ]
+                                                        
+                                                        for email_selector in email_selectors:
+                                                            try:
+                                                                email_elements = bot.driver.find_elements(By.XPATH, email_selector)
+                                                                for email_elem in email_elements:
+                                                                    if '@' in email_elem.text and '.' in email_elem.text:
+                                                                        agent_email = email_elem.text.strip()
+                                                                        logging.info(f"Found email address: {agent_email}")
+                                                                        break
+                                                                    elif 'href' in email_elem.get_attribute('outerHTML'):
+                                                                        href = email_elem.get_attribute('href')
+                                                                        if 'AgentEmailAddress=' in href:
+                                                                            # Extract email from href parameter
+                                                                            email_match = re.search(r'AgentEmailAddress=([^&]+)', href)
+                                                                            if email_match:
+                                                                                agent_email = email_match.group(1)
+                                                                                logging.info(f"Extracted email from href: {agent_email}")
+                                                                                break
+                                                                
+                                                                if agent_email:
+                                                                    break
+                                                            except:
+                                                                continue
+                                                        
+                                                        break
+                                                
+                                                if found_agent_link:
+                                                    break
+                                        except:
+                                            continue
+                                    
+                                    # If we found an email, update the CSV file
+                                    if agent_email:
+                                        # Read the current CSV file
+                                        rows = []
+                                        with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+                                            reader = csv.DictReader(f)
+                                            for row in reader:
+                                                # Update the email for the matching agent
+                                                if row['AGENT_NAME'].strip() == agent_name.strip():
+                                                    row['EMAIL'] = agent_email
+                                                rows.append(row)
+                                        
+                                        # Write the updated data back to the CSV file
+                                        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                                            writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
+                                            writer.writeheader()
+                                            writer.writerows(rows)
+                                        
+                                        logging.info(f"Updated CSV with email for {agent_name}: {agent_email}")
+                                    else:
+                                        logging.warning(f"Could not find email address for {agent_name}")
+                                        
+                                    # Navigate back to Nestfully home for next search
+                                    bot.driver.get("https://www.nestfully.com/")
+                                    time.sleep(random.uniform(2.0, 3.0))
+                                    
+                                except Exception as e:
+                                    logging.error(f"Error finding agent link or email: {str(e)}")
+                                
+                                # Capture screenshot of results/detail page
+                                screenshot_dir = os.path.join(os.path.dirname(csv_file), "agent_screenshots")
+                                os.makedirs(screenshot_dir, exist_ok=True)
+                                
+                                screenshot_file = os.path.join(
+                                    screenshot_dir, 
+                                    f"agent_{first_name}_{last_name}_{index+1}.png"
+                                )
+                                bot.driver.save_screenshot(screenshot_file)
+                                logging.info(f"Saved screenshot to {screenshot_file}")
+                                
+                                # Add a delay between searches
+                                delay = random.uniform(5.0, 8.0)
+                                logging.info(f"Waiting {delay:.1f} seconds before next agent search...")
+                                time.sleep(delay)
+                                
+                            except Exception as e:
+                                logging.error(f"Error searching for agent {agent_name}: {str(e)}")
+                                
+                    except Exception as e:
+                        logging.error(f"Error processing agent at index {index}: {str(e)}")
+                        continue
+            else:
+                logging.warning("No agents found in the CSV file")
+                
+        except Exception as e:
+            logging.error(f"Error in Nestfully agent search: {str(e)}")
+            # We're using the existing browser so no special cleanup is needed here
     finally:
-        bot.close()
+        # Use the close method only if there's still an active driver
+        try:
+            bot.close()
+        except:
+            pass
         # Add a note to the log file that the report is available
         logging.info(f"Complete scraping report is available in: {os.path.abspath(log_filename)}")
