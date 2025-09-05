@@ -2214,7 +2214,7 @@ if __name__ == "__main__":
             # Continue to the next zipcode
             
             # Random delay between zipcodes
-            delay = random.uniform(20, 40)
+            delay = random.uniform(1, 3)
             logging.info(f"Waiting {delay:.1f} seconds before next zipcode...")
             time.sleep(delay)
 
@@ -2269,37 +2269,13 @@ if __name__ == "__main__":
                             
                             logging.info(f"Searching for agent: {first_name} {last_name} ({index+1}/{len(agent_data)})")
                             
-                            # Navigate to Nestfully agent search
-                            bot.driver.get("https://www.nestfully.com/")
+                            # Navigate directly to Nestfully agent search page
+                            bot.driver.get("https://www.nestfully.com/agentsearch/search.aspx")
                             time.sleep(random.uniform(2.0, 4.0))
                             
                             # Wait for the page to load
                             wait = WebDriverWait(bot.driver, 10)
                             wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
-                            
-                            # Look for find agent link/button if we're on homepage
-                            try:
-                                # Try different possible elements for "Find an Agent" navigation
-                                find_agent_selectors = [
-                                    "//a[contains(text(), 'Find an Agent') or contains(text(), 'Find Agent')]",
-                                    "//a[contains(@href, 'agent') and contains(@href, 'search')]",
-                                    "//button[contains(text(), 'Find an Agent') or contains(text(), 'Find Agent')]",
-                                    "//nav//a[contains(text(), 'Agent')]"
-                                ]
-                                
-                                for selector in find_agent_selectors:
-                                    try:
-                                        find_agent_elem = bot.driver.find_element(By.XPATH, selector)
-                                        if find_agent_elem and find_agent_elem.is_displayed():
-                                            logging.info(f"Found 'Find Agent' navigation element, clicking it")
-                                            find_agent_elem.click()
-                                            time.sleep(2)
-                                            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
-                                            break
-                                    except:
-                                        continue
-                            except Exception as e:
-                                logging.warning(f"Could not find agent search navigation: {str(e)}")
                             
                             # Find and fill first name field
                             try:
