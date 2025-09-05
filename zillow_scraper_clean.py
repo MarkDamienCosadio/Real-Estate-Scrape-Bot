@@ -6,6 +6,8 @@ import re
 import json
 import pandas as pd
 import undetected_chromedriver as uc
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,8 +19,17 @@ from selenium.webdriver.common.actions.mouse_button import MouseButton
 import logging
 
 # Configure logging
+log_filename = 'scrape_report.log'
+
+# Create a visible separator between runs
+with open(log_filename, 'a', encoding='utf-8') as f:
+    separator = "\n" + "="*80 + "\n"
+    separator += f" NEW SCRAPING SESSION STARTED AT {time.strftime('%Y-%m-%d %H:%M:%S')} "
+    separator += "\n" + "="*80 + "\n"
+    f.write(separator)
+
 logging.basicConfig(
-    filename='zillow_scraper.log',
+    filename=log_filename,
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -26,6 +37,8 @@ logging.basicConfig(
 # Also log to console
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console.setFormatter(formatter)
 logging.getLogger('').addHandler(console)
 
 ZIPCODES = [
@@ -34,7 +47,10 @@ ZIPCODES = [
 
 class ZillowScraper:
     def __init__(self, options=None, max_listings=0, keep_browser_open=False, first_page_only=False, debug_all_li=False):
+        # Add session start information
+        logging.info("-" * 60)
         logging.info("Initializing ZillowScraper...")
+        logging.info(f"Session started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Create timestamp for the output file
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -60,7 +76,7 @@ class ZillowScraper:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
             writer.writeheader()
 
-        # Initialize Chrome with version matching
+        # Initialize Chrome with version matching using undetected_chromedriver
         if options is None:
             options = uc.ChromeOptions()
             options.add_argument('--disable-blink-features=AutomationControlled')
@@ -78,13 +94,103 @@ class ZillowScraper:
             options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.7258.155 Safari/537.36')
 
         try:
-            self.driver = uc.Chrome(
-                options=options,
-                version_main=139  # Match the current Chrome version
-            )
-            logging.info("Successfully initialized Chrome with version 139")
+            logging.info("Attempting to initialize Chrome with undetected_chromedriver...")
+            
+            # Try different browser versions if needed
+            browser_versions_to_try = [None, 119, 120, 118, 121]
+            
+            # First attempt - use version 139 (matching your installed Chrome)
+            try:
+                logging.info("Trying with exact Chrome version 139")
+                self.driver = uc.Chrome(
+                    options=options,
+                    version_main=139,  # Explicitly set to match your Chrome version
+                    use_subprocess=True,
+                    driver_executable_path=None  # Let it download the correct driver
+                )
+                logging.info("Successfully initialized Chrome with version 139")
+            except Exception as e1:
+                logging.warning(f"First attempt with version 139 failed: {str(e1)}")
+                
+                # Second attempt - try with a clean options object (reusing options causes errors)
+                try:
+                    logging.info("Trying with clean options object")
+                    clean_options = uc.ChromeOptions()
+                    # Copy essential arguments
+                    clean_options.add_argument("--no-sandbox")
+                    clean_options.add_argument("--disable-dev-shm-usage")
+                    
+                    # Try with version 139
+                    self.driver = uc.Chrome(
+                        options=clean_options,
+                        version_main=139,
+                        use_subprocess=True,
+                        driver_executable_path=None
+                    )
+                    logging.info("Successfully initialized Chrome with clean options")
+                except Exception as e2:
+                    logging.warning(f"Second attempt failed: {str(e2)}")
+                    
+                    # Third attempt - try to get exact driver version for 139
+                    try:
+                        logging.info("Trying with specific ChromeDriver version for Chrome 139")
+                        # Create a driver_version.py file to override the version detection
+                        driver_version_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_version.py")
+                        with open(driver_version_path, "w") as f:
+                            f.write("version_main = 139\n")
+                            f.write("version_full = '139.0.7258.155'\n")
+                        
+                        # Use a completely fresh options object
+                        fresh_options = uc.ChromeOptions()
+                        fresh_options.add_argument("--no-sandbox")
+                        
+                        self.driver = uc.Chrome(
+                            options=fresh_options,
+                            use_subprocess=True,
+                            version_main=139,
+                            force_version=True
+                        )
+                        logging.info("Successfully initialized Chrome with forced version")
+                    except Exception as e3:
+                        logging.warning(f"Third attempt failed: {str(e3)}")
+                        
+                        # Final attempt - use standard selenium with undetected options
+                        try:
+                            logging.info("Trying with standard Selenium as last resort")
+                            from selenium import webdriver
+                            from selenium.webdriver.chrome.service import Service
+                            
+                            # Create standard options
+                            std_options = webdriver.ChromeOptions()
+                            std_options.add_argument("--no-sandbox")
+                            std_options.add_argument("--disable-dev-shm-usage")
+                            std_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                            std_options.add_experimental_option("useAutomationExtension", False)
+                            
+                            # Try to initialize with standard selenium
+                            self.driver = webdriver.Chrome(options=std_options)
+                            
+                            # Apply stealth settings after initialization
+                            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+                                "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.7258.155 Safari/537.36'
+                            })
+                            
+                            # Try to execute stealth script
+                            try:
+                                self.driver.execute_script("""
+                                    Object.defineProperty(navigator, 'webdriver', {
+                                        get: () => undefined
+                                    });
+                                """)
+                            except:
+                                pass
+                                
+                            logging.info("Successfully initialized with standard Selenium")
+                        except Exception as e4:
+                            logging.error(f"All initialization attempts failed: {str(e4)}")
+                            raise  # Re-raise the exception to stop execution
         except Exception as e:
-            logging.error(f"Failed to initialize Chrome with version 139: {str(e)}")
+            logging.error(f"Failed to initialize Chrome: {str(e)}")
             raise  # Re-raise the exception to stop execution
 
         # Set random window size
@@ -1951,6 +2057,10 @@ class ZillowScraper:
                     logging.info("Browser session closed successfully")
                 except Exception as e:
                     logging.error(f"Error closing browser: {str(e)}")
+        
+        # Add session end information
+        logging.info(f"Session ended at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logging.info("-" * 60)
 
 if __name__ == "__main__":
     import argparse
@@ -1962,14 +2072,32 @@ if __name__ == "__main__":
     parser.add_argument('--first-page-only', action='store_true', help='Only process listings from the first page (for testing)')
     parser.add_argument('--zipcode', type=str, help='Specific zipcode to process (overrides the default list)')
     parser.add_argument('--debug-all-li', action='store_true', help='Debug mode: process all li elements as potential listings')
+    parser.add_argument('--headless', action='store_true', help='Run Chrome in headless mode (without visible browser)')
     args = parser.parse_args()
     
-    # Chrome options
+    # Chrome options for undetected_chromedriver
     options = uc.ChromeOptions()
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument('--disable-notifications')
     options.add_argument('--disable-popup-blocking')
     options.add_argument('--start-maximized')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    
+    # Add headless mode if requested
+    if args.headless:
+        logging.info("Running in headless mode")
+        options.add_argument('--headless')  # For undetected_chromedriver
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        
+        # Add additional options to make headless mode more stable
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-software-rasterizer')
+        
+        # Add a mainstream user agent to help avoid detection
+        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.7258.155 Safari/537.36')
     
     # Create the scraper instance with our options
     bot = ZillowScraper(options, args.max_listings, args.keep_browser_open, args.first_page_only, args.debug_all_li)
@@ -2006,7 +2134,13 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         logging.info("Scraper stopped by user")
+        logging.info("Summary: Script execution was interrupted by user")
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}")
+        logging.error("Summary: Script execution failed due to unexpected error")
+    else:
+        logging.info("Summary: Script execution completed successfully")
     finally:
         bot.close()
+        # Add a note to the log file that the report is available
+        logging.info(f"Complete scraping report is available in: {os.path.abspath(log_filename)}")
