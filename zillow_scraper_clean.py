@@ -68,7 +68,7 @@ class ZillowScraper:
         # Initialize the CSV file with headers
         self.fieldnames = [
             'ZIPCODE', 'MLS', 'PRICE', 'ADDRESS', 'BEDS', 'BATHS', 'SQFT',
-            'URL', 'MAPS_URL', 'DAYS_ON_MARKET', 'AGENT_NAME', 'AGENT_PHONE'
+            'URL', 'MAPS_URL', 'DAYS_ON_MARKET', 'AGENT_NAME', 'AGENT_PHONE', 'EMAIL'
         ]
 
         # Always overwrite and create the CSV file with headers
@@ -941,6 +941,11 @@ class ZillowScraper:
                         # Add to processed URLs set
                         self.processed_urls.add(listing_url)
                         
+                        # Random wait before opening listing (2-6 seconds)
+                        random_wait = random.uniform(2.0, 6.0)
+                        logging.info(f"Waiting {random_wait:.2f} seconds before opening listing")
+                        time.sleep(random_wait)
+                        
                         # Open in a new tab
                         try:
                             # Open new tab with JavaScript
@@ -1190,7 +1195,8 @@ class ZillowScraper:
                 'MAPS_URL': '',
                 'DAYS_ON_MARKET': '',
                 'AGENT_NAME': '',
-                'AGENT_PHONE': ''
+                'AGENT_PHONE': '',
+                'EMAIL': ''
             }
             
             # Extract price using the exact selector
@@ -1362,19 +1368,48 @@ class ZillowScraper:
                 '//div[contains(text(), "MLS")]'
             ]
             
+            mls_found = False
             for selector in mls_selectors:
                 try:
                     mls_elem = self.driver.find_element(By.XPATH, selector)
                     mls_text = mls_elem.text.strip()
                     if mls_text:
-                        # Extract just the MLS number - everything after "MLS#:" or "MLS #:" or similar
+                        logging.info(f"Raw MLS text: '{mls_text}'")
+                        # Try the standard MLS format
                         mls_match = re.search(r'MLS#?:?\s*([A-Za-z0-9\-]+)', mls_text)
                         if mls_match:
                             data['MLS'] = mls_match.group(1).strip()
                             logging.info(f"Found MLS: {data['MLS']}")
+                            mls_found = True
                             break
                 except Exception:
                     continue
+                    
+            # If no MLS was found, use days on market information as MLS
+            if not mls_found or not data['MLS']:
+                logging.info("No MLS found, trying to use days/hours on market information instead")
+                dom_selectors_for_mls = [
+                    # Find elements with days/hours information
+                    '//dt/strong[contains(text(), "day") or contains(text(), "days") or contains(text(), "hour") or contains(text(), "hours")]',
+                    '//dl/dt/strong[contains(text(), "day") or contains(text(), "days") or contains(text(), "hour") or contains(text(), "hours")]',
+                    '//span[contains(text(), "day") or contains(text(), "days") or contains(text(), "hour") or contains(text(), "hours")]',
+                    '//div[contains(text(), "day") or contains(text(), "days") or contains(text(), "hour") or contains(text(), "hours")]'
+                ]
+                
+                for selector in dom_selectors_for_mls:
+                    try:
+                        dom_elem = self.driver.find_element(By.XPATH, selector)
+                        dom_text = dom_elem.text.strip()
+                        if dom_text:
+                            logging.info(f"Raw days/hours text for MLS: '{dom_text}'")
+                            # Extract the days/hours information for MLS
+                            days_match = re.search(r'(\d+)\s*(?:days?|hours?)', dom_text, re.IGNORECASE)
+                            if days_match:
+                                data['MLS'] = days_match.group(0).strip()  # Include both number and "days"/"hours" text
+                                logging.info(f"Using as MLS: {data['MLS']}")
+                                break
+                    except Exception:
+                        continue
                     
             # Extract days on market
             dom_selectors = [
@@ -1403,19 +1438,36 @@ class ZillowScraper:
                     dom_text = dom_elem.text.strip()
                     if dom_text:
                         logging.info(f"Raw days on market text: '{dom_text}'")
-                        # Try to extract just the number followed by "day" or "days"
-                        dom_match = re.search(r'(\d+)\s*days?', dom_text, re.IGNORECASE)
+                        # Try to extract number followed by "day", "days", "hour", or "hours"
+                        dom_match = re.search(r'(\d+\s*(?:days?|hours?))', dom_text, re.IGNORECASE)
                         if dom_match:
-                            data['DAYS_ON_MARKET'] = dom_match.group(1)  # Get just the number
-                            logging.info(f"Found days on market: {data['DAYS_ON_MARKET']}")
+                            data['DAYS_ON_MARKET'] = dom_match.group(1)  # Get the full match (number + unit)
+                            logging.info(f"Found days/hours on market: {data['DAYS_ON_MARKET']}")
                             break
                         else:
-                            # Fall back to just getting any number if the format isn't exactly as expected
-                            dom_match = re.search(r'(\d+)', dom_text)
+                            # Try to match just days
+                            dom_match = re.search(r'(\d+)\s*days?', dom_text, re.IGNORECASE)
                             if dom_match:
-                                data['DAYS_ON_MARKET'] = dom_match.group(1)
-                                logging.info(f"Found days on market (fallback method): {data['DAYS_ON_MARKET']}")
+                                # Reconstruct with proper formatting
+                                data['DAYS_ON_MARKET'] = f"{dom_match.group(1)} days"
+                                logging.info(f"Found days on market: {data['DAYS_ON_MARKET']}")
                                 break
+                            else:
+                                # Try to match just hours
+                                dom_match = re.search(r'(\d+)\s*hours?', dom_text, re.IGNORECASE)
+                                if dom_match:
+                                    # Reconstruct with proper formatting
+                                    data['DAYS_ON_MARKET'] = f"{dom_match.group(1)} hours"
+                                    logging.info(f"Found hours on market: {data['DAYS_ON_MARKET']}")
+                                    break
+                                else:
+                                    # Fall back to just getting any number if the format isn't exactly as expected
+                                    dom_match = re.search(r'(\d+)', dom_text)
+                                    if dom_match:
+                                        # Just use the number and assume days
+                                        data['DAYS_ON_MARKET'] = f"{dom_match.group(1)} days"
+                                        logging.info(f"Found days on market (fallback method): {data['DAYS_ON_MARKET']}")
+                                        break
                 except Exception as e:
                     logging.debug(f"Error with DOM selector '{selector}': {str(e)}")
                     continue
@@ -1485,6 +1537,40 @@ class ZillowScraper:
                             # Remove trailing commas or other punctuation
                             data['AGENT_PHONE'] = phone_match.group(0).rstrip(',.')
                             logging.info(f"Found agent phone: {data['AGENT_PHONE']}")
+                            break
+                except Exception:
+                    continue
+            
+            # Extract agent email using the specific element
+            email_selectors = [
+                # Direct email selectors
+                '//a[contains(@href, "mailto:")]',
+                '//span[contains(text(), "@") and contains(text(), ".")]',
+                '//div[contains(text(), "@") and contains(text(), ".")]',
+                # Look for contact information sections
+                '//div[contains(@class, "contact-info")]//a[contains(@href, "mailto:")]',
+                '//div[contains(@class, "agent-info")]//a[contains(@href, "mailto:")]',
+                '//span[contains(@class, "email")]',
+                '//div[contains(@class, "email")]'
+            ]
+            
+            for selector in email_selectors:
+                try:
+                    email_elem = self.driver.find_element(By.XPATH, selector)
+                    email_text = email_elem.text.strip()
+                    
+                    # If no text but has href, extract from href
+                    if not email_text and 'href' in email_elem.get_attribute('outerHTML'):
+                        href = email_elem.get_attribute('href')
+                        if href and 'mailto:' in href:
+                            email_text = href.replace('mailto:', '')
+                    
+                    if email_text:
+                        # Validate it looks like an email
+                        email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email_text)
+                        if email_match:
+                            data['EMAIL'] = email_match.group(0)
+                            logging.info(f"Found agent email: {data['EMAIL']}")
                             break
                 except Exception:
                     continue
