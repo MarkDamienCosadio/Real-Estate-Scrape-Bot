@@ -2153,7 +2153,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Zillow Property Scraper')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retries per zipcode')
-    parser.add_argument('--max-listings', type=int, default=5, help='Maximum number of listings to process per zipcode (0 for all listings)')  # Changed default to 5 for testing
+    parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')  # Changed back to 0 to process all listings
     parser.add_argument('--keep-browser-open', action='store_true', help='Keep browser open when the script finishes')
     parser.add_argument('--first-page-only', action='store_true', help='Only process listings from the first page (for testing)')
     parser.add_argument('--zipcode', type=str, help='Specific zipcode to process (overrides the default list)')
