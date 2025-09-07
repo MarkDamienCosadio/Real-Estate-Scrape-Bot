@@ -941,8 +941,8 @@ class ZillowScraper:
                         # Add to processed URLs set
                         self.processed_urls.add(listing_url)
                         
-                        # Random wait before opening listing (2-6 seconds)
-                        random_wait = random.uniform(2.0, 6.0)
+                        # Random wait before opening listing (1-5 seconds)
+                        random_wait = random.uniform(1.0, 5.0)
                         logging.info(f"Waiting {random_wait:.2f} seconds before opening listing")
                         time.sleep(random_wait)
                         
@@ -2153,7 +2153,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Zillow Property Scraper')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retries per zipcode')
-    parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')  # Changed back to 0 to process all listings
+    parser.add_argument('--max-listings', type=int, default=0, help='Maximum number of listings to process per zipcode (0 for all listings)')  # Changed to 10 for testing
     parser.add_argument('--keep-browser-open', action='store_true', help='Keep browser open when the script finishes')
     parser.add_argument('--first-page-only', action='store_true', help='Only process listings from the first page (for testing)')
     parser.add_argument('--zipcode', type=str, help='Specific zipcode to process (overrides the default list)')
@@ -2214,7 +2214,7 @@ if __name__ == "__main__":
             # Continue to the next zipcode
             
             # Random delay between zipcodes
-            delay = random.uniform(1, 3)
+            delay = random.uniform(2.0, 5.0)
             logging.info(f"Waiting {delay:.1f} seconds before next zipcode...")
             time.sleep(delay)
 
@@ -2264,86 +2264,164 @@ if __name__ == "__main__":
                         # Split into first and last name
                         name_parts = agent_name.split()
                         if len(name_parts) >= 2:
+                            # Create a list of name combinations to try
+                            name_combinations = []
+                            
+                            # Combination 1: Default - first word as first name, last word as last name
+                            name_combinations.append({
+                                'first_name': name_parts[0],
+                                'last_name': name_parts[-1]
+                            })
+                            
+                            # For names with 3 parts, try various combinations
+                            if len(name_parts) == 3:
+                                # Combination 2: first name = first part, last name = all remaining parts
+                                name_combinations.append({
+                                    'first_name': name_parts[0],
+                                    'last_name': ' '.join(name_parts[1:])
+                                })
+                                
+                                # Combination 3: first name = first two parts, last name = remaining parts
+                                name_combinations.append({
+                                    'first_name': ' '.join(name_parts[:2]),
+                                    'last_name': ' '.join(name_parts[2:])
+                                })
+                            
+                            # For names with 4+ parts, add more combinations
+                            elif len(name_parts) >= 4:
+                                    # Clear existing combinations to match exactly what was requested
+                                    name_combinations = []
+                                    
+                                    # Combination 1: First word as first name, last word as last name
+                                    # Ex: Mark Damien Dagar Cosadio -> First: Mark, Last: Cosadio
+                                    name_combinations.append({
+                                        'first_name': name_parts[0],
+                                        'last_name': name_parts[-1]
+                                    })
+                                    
+                                    # Combination 2: First two words as first name, last word as last name
+                                    # Ex: Mark Damien Dagar Cosadio -> First: Mark Damien, Last: Cosadio
+                                    name_combinations.append({
+                                        'first_name': ' '.join(name_parts[:2]),
+                                        'last_name': name_parts[-1]
+                                    })
+                                    
+                                    # Combination 3: First two words as first name, last two words as last name
+                                    # Ex: Mark Damien Dagar Cosadio -> First: Mark Damien, Last: Dagar Cosadio
+                                    name_combinations.append({
+                                        'first_name': ' '.join(name_parts[:2]),
+                                        'last_name': ' '.join(name_parts[2:])
+                                    })
+                                    
+                                    # Combination 4: First three words as first name, last word as last name
+                                    # Ex: Mark Damien Dagar Cosadio -> First: Mark Damien Dagar, Last: Cosadio
+                                    name_combinations.append({
+                                        'first_name': ' '.join(name_parts[:3]),
+                                        'last_name': name_parts[-1]
+                                    })
+                                    
+                                    # Combination 5: First word as first name, remaining words as last name
+                                    # Ex: Mark Damien Dagar Cosadio -> First: Mark, Last: Damien Dagar Cosadio
+                                    name_combinations.append({
+                                        'first_name': name_parts[0],
+                                        'last_name': ' '.join(name_parts[1:])
+                                    })
+                            
+                            logging.info(f"Will try {len(name_combinations)} name combinations for agent: {agent_name} ({index+1}/{len(agent_data)})")
+                            
+                            # Set initial combination
                             first_name = name_parts[0]
                             last_name = name_parts[-1]
                             
-                            logging.info(f"Searching for agent: {first_name} {last_name} ({index+1}/{len(agent_data)})")
+                            # Track if we found the agent with any combination
+                            agent_found = False
+                            agent_email = None
                             
-                            # Navigate directly to Nestfully agent search page
-                            bot.driver.get("https://www.nestfully.com/agentsearch/search.aspx")
-                            time.sleep(random.uniform(2.0, 4.0))
-                            
-                            # Wait for the page to load
-                            wait = WebDriverWait(bot.driver, 10)
-                            wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
-                            
-                            # Find and fill first name field
-                            try:
-                                # Try different possible input field selectors
-                                first_name_selectors = [
-                                    (By.ID, "Master_FirstName"),
-                                    (By.XPATH, "//input[@placeholder='First Name...']"),
-                                    (By.XPATH, "//input[contains(@name, 'FirstName')]"),
-                                    (By.XPATH, "//input[contains(@id, 'FirstName')]"),
-                                    (By.XPATH, "//label[contains(text(), 'First')]/following-sibling::input"),
-                                    (By.XPATH, "//label[contains(text(), 'First')]/..//input")
-                                ]
-                                
-                                first_name_field = None
-                                for selector in first_name_selectors:
-                                    try:
-                                        first_name_field = wait.until(EC.presence_of_element_located(selector))
-                                        if first_name_field and first_name_field.is_displayed():
-                                            logging.info(f"Found first name input with selector: {selector}")
-                                            break
-                                    except:
-                                        continue
-                                        
-                                if not first_name_field:
-                                    raise Exception("Could not find first name input field")
-                                
-                                first_name_field.clear()
-                                first_name_field.send_keys(first_name)
-                                logging.info(f"Entered first name: {first_name}")
-                                
-                                # Find and fill last name field - try multiple selectors
-                                last_name_selectors = [
-                                    (By.ID, "Master_LastName"),
-                                    (By.XPATH, "//input[@placeholder='Last Name...']"),
-                                    (By.XPATH, "//input[contains(@name, 'LastName')]"),
-                                    (By.XPATH, "//input[contains(@id, 'LastName')]"),
-                                    (By.XPATH, "//label[contains(text(), 'Last')]/following-sibling::input"),
-                                    (By.XPATH, "//label[contains(text(), 'Last')]/..//input")
-                                ]
-                                
-                                last_name_field = None
-                                for selector in last_name_selectors:
-                                    try:
-                                        last_name_field = bot.driver.find_element(*selector)
-                                        if last_name_field and last_name_field.is_displayed():
-                                            logging.info(f"Found last name input with selector: {selector}")
-                                            break
-                                    except:
-                                        continue
-                                
-                                if not last_name_field:
-                                    raise Exception("Could not find last name input field")
+                            # Try each name combination
+                            for combo_idx, combo in enumerate(name_combinations):
+                                if agent_found:
+                                    break
                                     
-                                last_name_field.clear()
-                                last_name_field.send_keys(last_name)
-                                logging.info(f"Entered last name: {last_name}")
+                                first_name = combo['first_name']
+                                last_name = combo['last_name']
                                 
-                                # Send Enter key to submit the form instead of clicking a button
-                                last_name_field.send_keys(Keys.RETURN)
-                                logging.info("Pressed Enter key to submit the search")
+                                logging.info(f"Trying name combination {combo_idx+1}: '{first_name}' '{last_name}'")
+                            
+                                # Navigate directly to Nestfully agent search page for each attempt
+                                bot.driver.get("https://www.nestfully.com/agentsearch/search.aspx")
+                                time.sleep(random.uniform(1.0, 3.0))
+                                
+                                # Wait for the page to load
+                                wait = WebDriverWait(bot.driver, 10)
+                                wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+                            
+                                # For each name combination, find and fill form fields
+                                try:
+                                    # Try different possible input field selectors
+                                    first_name_selectors = [
+                                        (By.ID, "Master_FirstName"),
+                                        (By.XPATH, "//input[@placeholder='First Name...']"),
+                                        (By.XPATH, "//input[contains(@name, 'FirstName')]"),
+                                        (By.XPATH, "//input[contains(@id, 'FirstName')]"),
+                                        (By.XPATH, "//label[contains(text(), 'First')]/following-sibling::input"),
+                                        (By.XPATH, "//label[contains(text(), 'First')]/..//input")
+                                    ]
+                                    
+                                    first_name_field = None
+                                    for selector in first_name_selectors:
+                                        try:
+                                            first_name_field = wait.until(EC.presence_of_element_located(selector))
+                                            if first_name_field and first_name_field.is_displayed():
+                                                logging.info(f"Found first name input with selector: {selector}")
+                                                break
+                                        except:
+                                            continue
+                                            
+                                    if not first_name_field:
+                                        raise Exception("Could not find first name input field")
+                                    
+                                    first_name_field.clear()
+                                    first_name_field.send_keys(first_name)
+                                    logging.info(f"Entered first name: {first_name}")
+                                    
+                                    # Find and fill last name field - try multiple selectors
+                                    last_name_selectors = [
+                                        (By.ID, "Master_LastName"),
+                                        (By.XPATH, "//input[@placeholder='Last Name...']"),
+                                        (By.XPATH, "//input[contains(@name, 'LastName')]"),
+                                        (By.XPATH, "//input[contains(@id, 'LastName')]"),
+                                        (By.XPATH, "//label[contains(text(), 'Last')]/following-sibling::input"),
+                                        (By.XPATH, "//label[contains(text(), 'Last')]/..//input")
+                                    ]
+                                    
+                                    last_name_field = None
+                                    for selector in last_name_selectors:
+                                        try:
+                                            last_name_field = bot.driver.find_element(*selector)
+                                            if last_name_field and last_name_field.is_displayed():
+                                                logging.info(f"Found last name input with selector: {selector}")
+                                                break
+                                        except:
+                                            continue
+                                    
+                                    if not last_name_field:
+                                        raise Exception("Could not find last name input field")
+                                        
+                                    last_name_field.clear()
+                                    last_name_field.send_keys(last_name)
+                                    logging.info(f"Entered last name: {last_name}")
+                                    
+                                        # Send Enter key to submit the form instead of clicking a button
+                                    last_name_field.send_keys(Keys.RETURN)
+                                    logging.info(f"Pressed Enter key to submit the search for combination {combo_idx+1}")
+                                
+                                except Exception as e:
+                                    logging.error(f"Error filling form with combination {combo_idx+1}: {str(e)}")
+                                    continue
                                 
                                 # Wait for results to load
-                                time.sleep(random.uniform(3.0, 5.0))
+                                time.sleep(random.uniform(1.0, 3.0))
                                 wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
-                                
-                                # Try to find and click on the agent's name link in search results
-                                found_agent_link = False
-                                agent_email = None
                                 
                                 try:
                                     # Try different selectors to find the agent link
@@ -2362,12 +2440,13 @@ if __name__ == "__main__":
                                             if agent_links:
                                                 for link in agent_links:
                                                     if link.is_displayed() and (first_name.lower() in link.text.lower() or last_name.lower() in link.text.lower()):
-                                                        logging.info(f"Found agent link: {link.text}")
+                                                        logging.info(f"Found agent link with combination {combo_idx+1}: {link.text}")
                                                         link.click()
                                                         found_agent_link = True
+                                                        agent_found = True  # Set the flag to stop trying other combinations
                                                         
                                                         # Wait for detail page to load
-                                                        time.sleep(random.uniform(2.0, 4.0))
+                                                        time.sleep(random.uniform(1.0, 3.0))
                                                         wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
                                                         
                                                         # Try to extract email address
@@ -2386,7 +2465,7 @@ if __name__ == "__main__":
                                                                 for email_elem in email_elements:
                                                                     if '@' in email_elem.text and '.' in email_elem.text:
                                                                         agent_email = email_elem.text.strip()
-                                                                        logging.info(f"Found email address: {agent_email}")
+                                                                        logging.info(f"Found email address using combination {combo_idx+1}: {agent_email}")
                                                                         break
                                                                     elif 'href' in email_elem.get_attribute('outerHTML'):
                                                                         href = email_elem.get_attribute('href')
@@ -2395,7 +2474,7 @@ if __name__ == "__main__":
                                                                             email_match = re.search(r'AgentEmailAddress=([^&]+)', href)
                                                                             if email_match:
                                                                                 agent_email = email_match.group(1)
-                                                                                logging.info(f"Extracted email from href: {agent_email}")
+                                                                                logging.info(f"Extracted email from href using combination {combo_idx+1}: {agent_email}")
                                                                                 break
                                                                 
                                                                 if agent_email:
@@ -2410,54 +2489,42 @@ if __name__ == "__main__":
                                         except:
                                             continue
                                     
-                                    # If we found an email, update the CSV file
+                                    # If we found an email, we'll break out of the combinations loop
                                     if agent_email:
-                                        # Read the current CSV file
-                                        rows = []
-                                        with open(csv_file, 'r', newline='', encoding='utf-8') as f:
-                                            reader = csv.DictReader(f)
-                                            for row in reader:
-                                                # Update the email for the matching agent
-                                                if row['AGENT_NAME'].strip() == agent_name.strip():
-                                                    row['EMAIL'] = agent_email
-                                                rows.append(row)
-                                        
-                                        # Write the updated data back to the CSV file
-                                        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-                                            writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
-                                            writer.writeheader()
-                                            writer.writerows(rows)
-                                        
-                                        logging.info(f"Updated CSV with email for {agent_name}: {agent_email}")
-                                    else:
-                                        logging.warning(f"Could not find email address for {agent_name}")
-                                        
-                                    # Navigate back to Nestfully home for next search
-                                    bot.driver.get("https://www.nestfully.com/")
-                                    time.sleep(random.uniform(2.0, 3.0))
-                                    
+                                        logging.info(f"Successfully found email with combination {combo_idx+1}")
                                 except Exception as e:
-                                    logging.error(f"Error finding agent link or email: {str(e)}")
-                                
-                                # Capture screenshot of results/detail page
-                                screenshot_dir = os.path.join(os.path.dirname(csv_file), "agent_screenshots")
-                                os.makedirs(screenshot_dir, exist_ok=True)
-                                
-                                screenshot_file = os.path.join(
-                                    screenshot_dir, 
-                                    f"agent_{first_name}_{last_name}_{index+1}.png"
-                                )
-                                bot.driver.save_screenshot(screenshot_file)
-                                logging.info(f"Saved screenshot to {screenshot_file}")
-                                
-                                # Add a delay between searches
-                                delay = random.uniform(5.0, 8.0)
-                                logging.info(f"Waiting {delay:.1f} seconds before next agent search...")
-                                time.sleep(delay)
-                                
-                            except Exception as e:
-                                logging.error(f"Error searching for agent {agent_name}: {str(e)}")
-                                
+                                    logging.error(f"Error finding agent link or email with combination {combo_idx+1}: {str(e)}")
+                            
+                            # After trying all combinations, if we found an email, update the CSV
+                            if agent_email:
+                                # Read the current CSV file
+                                rows = []
+                                try:
+                                    with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+                                        reader = csv.DictReader(f)
+                                        for row in reader:
+                                            # Update the email for the matching agent
+                                            if row['AGENT_NAME'].strip() == agent_name.strip():
+                                                row['EMAIL'] = agent_email
+                                            rows.append(row)
+                                    
+                                    # Write the updated data back to the CSV file
+                                    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                                        writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
+                                        writer.writeheader()
+                                        writer.writerows(rows)
+                                    
+                                    logging.info(f"Updated CSV with email for {agent_name}: {agent_email}")
+                                except Exception as csv_error:
+                                    logging.error(f"Error updating CSV file: {str(csv_error)}")
+                            else:
+                                logging.warning(f"Could not find email address for {agent_name} after trying {len(name_combinations)} name combinations")
+                            
+                            # Add a delay between agents
+                            delay = random.uniform(1.0, 3.0)
+                            logging.info(f"Waiting {delay:.1f} seconds before next agent search...")
+                            time.sleep(delay)
+                    
                     except Exception as e:
                         logging.error(f"Error processing agent at index {index}: {str(e)}")
                         continue
