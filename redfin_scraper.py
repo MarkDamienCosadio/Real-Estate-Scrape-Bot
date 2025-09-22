@@ -6,7 +6,6 @@ from selenium.webdriver.common.by import By
 import time
 import csv
 import re
-import os
 
 ZIPCODES = [
     '33009', '33019', '33119', '33128', '33129', '33130',
@@ -21,37 +20,39 @@ def setup_browser():
     options.add_argument('--disable-gpu')
     driver = uc.Chrome(options=options, use_subprocess=True)
     logging.info("Browser launched.")
-    # Set window to 1/4 of the screen and position it in the upper right corner
+    # Set window to 1/4 of the screen and position it in the upper left corner
     import ctypes
     user32 = ctypes.windll.user32
     screen_width = user32.GetSystemMetrics(0)
     screen_height = user32.GetSystemMetrics(1)
     window_width = int(screen_width / 2)
     window_height = int(screen_height / 2)
-    window_x = screen_width - window_width
+    window_x = 0
     window_y = 0
     driver.set_window_rect(window_x, window_y, window_width, window_height)
     logging.info(f"Set window size to {window_width}x{window_height} at position ({window_x}, {window_y})")
     return driver
 
+def extract_mls(driver):
+    """Extract MLS number from Redfin property page"""
+    try:
+        mls_elem = driver.find_element(By.XPATH, "//div[contains(text(), 'MLS#')]")
+        mls_match = re.search(r'MLS#\s*([A-Z0-9\-]+)', mls_elem.text)
+        if mls_match:
+            return mls_match.group(1)
+    except Exception:
+        pass
+    return ''
+
 def search_zipcode(driver, zipcode):
-    """Scrape Zillow for a given zipcode and save results to CSV."""
-    csv_file = 'zillow_results.csv'
+    """Scrape Redfin for a given zipcode and save results to CSV."""
+    csv_file = 'redfin_results.csv'
     headers = ['ZIPCODE', 'MLS', 'PRICE', 'ADDRESS', 'BEDS', 'BATHS', 'SQFT', 'URL', 'MAPS_URL', 'DAYS_ON_MARKET', 'AGENT_NAME', 'AGENT_PHONE', 'EMAIL']
+    import os
     # Always ensure headers are present in the CSV
-    write_headers = False
+    # Only write headers if file does not exist
     if not os.path.exists(csv_file):
-        write_headers = True
-    else:
-        try:
-            with open(csv_file, 'r', encoding='utf-8') as f:
-                first_line = f.readline()
-                if not first_line or not all(h in first_line for h in headers):
-                    write_headers = True
-        except Exception:
-            write_headers = True
-    if write_headers:
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
     saved_urls = set()
@@ -63,112 +64,97 @@ def search_zipcode(driver, zipcode):
                     saved_urls.add(row['URL'])
     except Exception:
         pass
-    # Use provided filtered URL for Hallandale FL 33009, otherwise default pattern
-    if zipcode == '33009':
-        search_url = "https://www.zillow.com/hallandale-fl-33009/?searchQueryState=%7B%22pagination%22%3A%7B%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A-80.1939404527588%2C%22east%22%3A-80.09351854724122%2C%22south%22%3A25.955104049959537%2C%22north%22%3A26.01759803433258%7D%2C%22regionSelection%22%3A%5B%7B%22regionId%22%3A72347%2C%22regionType%22%3A7%7D%5D%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22days%22%7D%2C%22price%22%3A%7B%22min%22%3A200000%7D%2C%22mp%22%3A%7B%22min%22%3A987%7D%2C%22beds%22%3A%7B%22min%22%3A2%7D%7D%2C%22isListVisible%22%3Atrue%2C%22mapZoom%22%3A14%2C%22usersSearchTerm%22%3A%22Hallandale%20FL%2033009%22%7D"
-    else:
-        search_url = f"https://www.zillow.com/homes/{zipcode}_rb/?searchQueryState=%7B%22filterState%22%3A%7B%22price%22%3A%7B%22min%22%3A200000%7D%2C%22beds%22%3A%7B%22min%22%3A2%7D%2C%22sort%22%3A%7B%22value%22%3A%22days%22%7D%7D%7D"
+    search_url = f"https://www.redfin.com/zipcode/{zipcode}/filter/sort=lo-days,min-price=200k,min-beds=2"
     driver.get(search_url)
-    time.sleep(3)
-    # Scroll all '/homedetails/' links into view
-    for _ in range(20):
-        anchors = driver.find_elements(By.XPATH, "//a[contains(@href, '/homedetails/')]")
-        for a in anchors:
-            href = a.get_attribute('href')
-            if href and '/homedetails/' in href:
-                driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", a)
-                time.sleep(0.3)
-        time.sleep(0.3)
-    MAX_LISTINGS = 100
+    time.sleep(2)
+    MAX_LISTINGS = 20
     listings_processed = 0
     page_num = 1
     while True:
         # Find all property cards
-        cards = driver.find_elements(By.CSS_SELECTOR, "article[data-test='property-card']")
+        cards = driver.find_elements(By.CSS_SELECTOR, "div.HomeCardContainer")
         logging.info(f"Found {len(cards)} property cards to process on page {page_num}.")
         hrefs = []
         for card in cards:
             try:
-                anchor = card.find_element(By.XPATH, ".//a[contains(@href, '/homedetails/')]")
+                anchor = card.find_element(By.XPATH, ".//a[contains(@href, '/home/')]")
                 href = anchor.get_attribute('href')
                 if href:
                     hrefs.append(href)
             except Exception as e:
                 logging.debug(f"Card anchor extraction error: {e}")
+        consecutive_skips = 0
         for href in hrefs:
             if listings_processed >= MAX_LISTINGS:
                 logging.info(f"Reached {MAX_LISTINGS} listings for zipcode {zipcode}. Stopping.")
                 return
             if href in saved_urls:
                 logging.info(f"Skipping already-saved property: {href}")
+                consecutive_skips += 1
+                if consecutive_skips >= 3:
+                    logging.info(f"Skipped 3 consecutive listings for zipcode {zipcode}. Assuming latest listings reached. Stopping.")
+                    return
                 continue
+            else:
+                consecutive_skips = 0
             try:
                 logging.info(f"Navigating to property card: {href}")
                 driver.get(href)
                 data = {}
                 data['ZIPCODE'] = zipcode
                 data['URL'] = href
-                # Extract MLS
                 try:
-                    mls_elem = driver.find_element(By.XPATH, "//span[contains(text(), 'MLS#')]")
+                    mls_elem = driver.find_element(By.CSS_SELECTOR, "span.ListingSource--mlsId")
                     mls_text = mls_elem.text.strip()
-                    match = re.search(r'MLS#?:?\s*([A-Za-z0-9\-]+)', mls_text)
-                    if match:
-                        data['MLS'] = match.group(1)
-                    else:
-                        data['MLS'] = ''
+                    if mls_text.startswith('#'):
+                        mls_text = mls_text[1:].strip()
+                    data['MLS'] = mls_text
                 except Exception:
-                    data['MLS'] = ''
-                # Extract address
+                    data['MLS'] = extract_mls(driver)
                 try:
-                    address_elem = driver.find_element(By.XPATH, "//h1[@itemprop='address']")
+                    address_elem = driver.find_element(By.CSS_SELECTOR, "h1.full-address.addressBannerRevamp.street-address")
                     data['ADDRESS'] = address_elem.text.strip()
                 except Exception:
                     data['ADDRESS'] = ''
-                # Extract price
                 try:
-                    price_elem = driver.find_element(By.XPATH, "//span[@data-testid='price']")
+                    price_elem = driver.find_element(By.CSS_SELECTOR, "div.statsValue.price")
                     data['PRICE'] = price_elem.text.strip()
                 except Exception:
                     data['PRICE'] = ''
-                # Extract beds
                 try:
-                    beds_elem = driver.find_element(By.XPATH, "//span[@data-testid='bed']")
+                    beds_elem = driver.find_element(By.CSS_SELECTOR, "div.stat-block.beds-section div.statsValue")
                     data['BEDS'] = beds_elem.text.strip()
                 except Exception:
                     data['BEDS'] = ''
-                # Extract baths
                 try:
-                    baths_elem = driver.find_element(By.XPATH, "//span[@data-testid='bath']")
+                    baths_elem = driver.find_element(By.CSS_SELECTOR, "div.stat-block.baths-section span.bp-DefinitionFlyout.bath-flyout.bp-DefinitionFlyout__underline")
                     data['BATHS'] = baths_elem.text.strip()
                 except Exception:
                     data['BATHS'] = ''
-                # Extract sqft
                 try:
-                    sqft_elem = driver.find_element(By.XPATH, "//span[@data-testid='sqft']")
+                    sqft_elem = driver.find_element(By.CSS_SELECTOR, "div.stat-block.sqft-section span.statsValue")
                     data['SQFT'] = sqft_elem.text.strip()
                 except Exception:
                     data['SQFT'] = ''
-                # Extract agent name
                 try:
-                    agent_elem = driver.find_element(By.XPATH, "//span[contains(@class, 'ListingAgentName')]")
+                    agent_elem = driver.find_element(By.CSS_SELECTOR, "span.agent-basic-details--heading span")
                     data['AGENT_NAME'] = agent_elem.text.strip()
                 except Exception:
                     data['AGENT_NAME'] = ''
-                # Extract agent phone
                 try:
-                    phone_elem = driver.find_element(By.XPATH, "//a[contains(@href, 'tel:')]")
-                    data['AGENT_PHONE'] = phone_elem.text.strip()
+                    phone_elem = driver.find_element(By.CSS_SELECTOR, "span[data-rf-test-id='agentInfoItem-agentPhoneNumber']")
+                    phone_text = phone_elem.text.strip()
+                    # Remove '(agent)' if present
+                    phone_text = phone_text.replace('(agent)', '').strip()
+                    data['AGENT_PHONE'] = phone_text
                 except Exception:
                     data['AGENT_PHONE'] = ''
                 data['EMAIL'] = ''
-                # Extract days on market
                 try:
-                    days_elem = driver.find_element(By.XPATH, "//span[contains(text(), 'days on Zillow')]")
+                    days_elem = driver.find_element(By.CSS_SELECTOR, "div.keyDetails-row div.keyDetails-value span.valueText")
                     data['DAYS_ON_MARKET'] = days_elem.text.strip()
                 except Exception:
                     data['DAYS_ON_MARKET'] = ''
-                # Construct Google Maps link from address if available
                 if data['ADDRESS']:
                     maps_query = data['ADDRESS'].replace(' ', '+')
                     data['MAPS_URL'] = f"https://www.google.com/maps/search/?api=1&query={maps_query}"
@@ -188,7 +174,7 @@ def search_zipcode(driver, zipcode):
             next_btn = None
             try:
                 next_btn = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "a[title='Next page']"))
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.PageArrow__direction--next"))
                 )
             except Exception:
                 pass
@@ -206,7 +192,7 @@ def search_zipcode(driver, zipcode):
             break
 
 def main():
-    log_filename = 'zillow_scraper.log'
+    log_filename = 'redfin_scraper.log'
     with open(log_filename, 'a', encoding='utf-8') as f:
         separator = "\n" + "="*80 + "\n"
         separator += f" NEW SCRAPING SESSION STARTED AT {time.strftime('%Y-%m-%d %H:%M:%S')} "
@@ -225,18 +211,18 @@ def main():
 
     driver = None
     try:
-        logging.info("Starting Zillow scraper...")
+        logging.info("Starting Redfin scraper...")
         driver = setup_browser()
         for zipcode in ZIPCODES:
             logging.info(f"Processing zipcode: {zipcode}")
             search_zipcode(driver, zipcode)
-        logging.info("All zipcodes processed. Applying cleaner logic to zillow_results.csv...")
-        # Cleaner logic (copied from redfin_scraper.py)
+        logging.info("All zipcodes processed. Applying cleaner logic to redfin_results.csv...")
+        # Cleaner logic
         import pandas as pd
         import re
         import os
-        csv_file = 'zillow_results.csv'
-        log_file = 'zillow_scraper_cleaner.log'
+        csv_file = 'redfin_results.csv'
+        log_file = 'redfin_scraper_cleaner.log'
         def valid_zipcode(val):
             return bool(re.match(r'^\d{5}$', str(val).strip()))
         def valid_mls(val):
@@ -277,7 +263,7 @@ def main():
             print(f"{deleted_count} rows deleted from {csv_file}. Cleaned file saved as {cleaned_path}.")
         else:
             print(f"{csv_file} not found for cleaning.")
-        logging.info("Cleaning complete. See zillow_scraper_cleaner.log for details.")
+        logging.info("Cleaning complete. See redfin_scraper_cleaner.log for details.")
     finally:
         if driver:
             driver.quit()
